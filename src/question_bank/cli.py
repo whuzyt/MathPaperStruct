@@ -98,9 +98,11 @@ def _run_ingest(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int
         _print_summary(result, stdout)
 
         # Shadow comparison: layout_ownership vs old splitter
-        if args.enable_layout_ownership and original_markdown is not None:
-            _run_shadow_comparison(args, result, original_markdown, stdout, stderr)
-        elif args.enable_layout_ownership:
+        # Enabled via CLI flag or ENABLE_LAYOUT_OWNERSHIP env var
+        enable_lo = args.enable_layout_ownership or settings.enable_layout_ownership
+        if enable_lo and original_markdown is not None:
+            _run_shadow_comparison(args, original_markdown, stdout, stderr)
+        elif enable_lo:
             print(
                 "layout-ownership shadow: no markdown available for comparison.",
                 file=stderr,
@@ -114,12 +116,16 @@ def _run_ingest(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int
 
 def _run_shadow_comparison(
     args: argparse.Namespace,
-    result: ProcessingResult,
     original_markdown: str,
     stdout: TextIO,
     stderr: TextIO,
 ) -> None:
-    """Run layout_ownership alongside the old splitter and print a comparison report."""
+    """Run layout_ownership alongside the old splitter and print a comparison report.
+
+    The old-splitter baseline always uses `original_markdown` — the raw MinerU
+    output file content — never reconstructed text from pipeline blocks. This
+    ensures the comparison is not skewed by the old splitter's own decisions.
+    """
     # Get MinerU JSON elements
     elements_path: Path | None = None
     if args.layout_elements is not None:

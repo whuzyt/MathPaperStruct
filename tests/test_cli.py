@@ -1,4 +1,5 @@
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -152,6 +153,107 @@ class FakeCursor:
 
     def fetchall(self):
         return self.rows
+
+
+    def test_env_enable_layout_ownership_runs_shadow_without_cli_flag(self):
+        """ENABLE_LAYOUT_OWNERSHIP=true enables shadow even without --enable-layout-ownership."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            markdown_path = tmp / "paper.md"
+            markdown_path.write_text("1. 已知 $x=1$。\n2. 如图，求面积。", encoding="utf-8")
+            elements_path = tmp / "elements.json"
+            elements_path.write_text(
+                json.dumps([
+                    {"id": "e1", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 已知 $x=1$。"},
+                    {"id": "e2", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.20, 0.50, 0.24], "text": "2. 如图，求面积。"},
+                ]),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch.dict("os.environ", {"ENABLE_LAYOUT_OWNERSHIP": "true"}):
+                exit_code = main(
+                    [
+                        "ingest",
+                        "--paper-id", "paper_001",
+                        "--from-markdown", str(markdown_path),
+                        "--layout-elements", str(elements_path),
+                        "--dry-run",
+                    ],
+                    stdout=stdout,
+                )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Layout Ownership Shadow Comparison", output)
+        self.assertIn("paper_001", output)
+        self.assertIn("old splitter question_count", output)
+
+    def test_from_markdown_shadow_uses_original_markdown_as_baseline(self):
+        """Shadow old-splitter baseline comes from the raw file, not pipeline blocks."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            # Original markdown has a section header, answer section, and 3 questions
+            original_content = (
+                "一、选择题\n"
+                "1. 选题一\n"
+                "A. 选项A\n"
+                "2. 选题二\n"
+                "B. 选项B\n"
+                "参考答案\n"
+                "1. A\n"
+                "2. B\n"
+            )
+            markdown_path = tmp / "paper.md"
+            markdown_path.write_text(original_content, encoding="utf-8")
+            elements_path = tmp / "elements.json"
+            elements_path.write_text(
+                json.dumps([
+                    {"id": "s1", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.06, 0.50, 0.09], "text": "一、选择题"},
+                    {"id": "e1", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.12, 0.50, 0.16], "text": "1. 选题一"},
+                    {"id": "e1a", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.18, 0.50, 0.22], "text": "A. 选项A"},
+                    {"id": "e2", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.25, 0.50, 0.29], "text": "2. 选题二"},
+                    {"id": "e2b", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.31, 0.50, 0.35], "text": "B. 选项B"},
+                    {"id": "ans_hdr", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.70, 0.50, 0.74], "text": "参考答案"},
+                    {"id": "ans1", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.76, 0.50, 0.80], "text": "1. A"},
+                    {"id": "ans2", "page": 1, "type": "text",
+                     "bbox": [0.08, 0.82, 0.50, 0.86], "text": "2. B"},
+                ]),
+                encoding="utf-8",
+            )
+            stdout = io.StringIO()
+
+            with patch.dict("os.environ", {"ENABLE_LAYOUT_OWNERSHIP": "true"}):
+                exit_code = main(
+                    [
+                        "ingest",
+                        "--paper-id", "paper_001",
+                        "--from-markdown", str(markdown_path),
+                        "--layout-elements", str(elements_path),
+                        "--enable-layout-ownership",
+                        "--dry-run",
+                    ],
+                    stdout=stdout,
+                )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        # The old splitter, when run on the original markdown, splits
+        # document sections first — body only has 2 questions (1, 2)
+        # before the answer section. So old_question_count should be 2.
+        self.assertIn("Layout Ownership Shadow Comparison", output)
+        self.assertIn("old splitter question_count : 2", output)
+        # Pipeline result (printed in summary) should also have 2 questions
+        self.assertIn("questions=2", output)
 
 
 if __name__ == "__main__":
