@@ -307,6 +307,170 @@ class LayoutOwnershipFixtureTests(unittest.TestCase):
                          f"should not flag duplicate across sections, got: {duplicate_warnings}")
 
 
+    # ------------------------------------------------------------------
+    # ADR 002: Nested Section Hierarchy
+    # ------------------------------------------------------------------
+
+    def test_nested_sections_do_not_flag_duplicate_across_different_paths(self):
+        """ADR 002: questions with same number under different section_path
+        are NOT duplicates. 向量小题A/1 and 向量小题B/1 have different paths."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "向量小题A"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.18, 0.50, 0.22], "text": "2. 题目B"},
+            {"id": "s2", "page": 1, "type": "text", "bbox": [0.08, 0.28, 0.50, 0.31], "text": "向量小题B"},
+            {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.34, 0.50, 0.38], "text": "1. 题目C"},
+            {"id": "e4", "page": 1, "type": "text", "bbox": [0.08, 0.42, 0.50, 0.46], "text": "2. 题目D"},
+            {"id": "s3", "page": 1, "type": "text", "bbox": [0.08, 0.52, 0.50, 0.55], "text": "向量小题C"},
+            {"id": "e5", "page": 1, "type": "text", "bbox": [0.08, 0.58, 0.50, 0.62], "text": "1. 题目E"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 5)
+        all_warnings = _collect_all_warnings(blocks)
+        duplicate_warnings = [w for w in all_warnings if "duplicate_question_number" in w]
+        self.assertEqual(len(duplicate_warnings), 0,
+                         f"nested paths should prevent false duplicates, got: {duplicate_warnings}")
+
+    def test_same_path_duplicate_still_warns(self):
+        """ADR 002: same number under same section_path IS still a duplicate."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.18, 0.50, 0.22], "text": "1. 题目B（同section重复）"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 2)
+        all_warnings = _collect_all_warnings(blocks)
+        duplicate_warnings = [w for w in all_warnings if "duplicate_question_number" in w]
+        self.assertEqual(len(duplicate_warnings), 1,
+                         f"same-path duplicate must warn, got: {all_warnings}")
+
+    def test_standard_section_nesting_with_nonstandard_top_level(self):
+        """ADR 002: 专题一 → 一、选择题 nests standard under nonstandard.
+        专题一/一、选择题/1 and 专题二/一、选择题/1 are different paths."""
+        elements = [
+            {"id": "t1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "专题一"},
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.11, 0.50, 0.15], "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.17, 0.50, 0.21], "text": "1. 专题一选择题"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.25, 0.50, 0.29], "text": "2. 专题一选择题"},
+            {"id": "t2", "page": 1, "type": "text", "bbox": [0.08, 0.35, 0.50, 0.39], "text": "专题二"},
+            {"id": "s2", "page": 1, "type": "text", "bbox": [0.08, 0.41, 0.50, 0.45], "text": "一、选择题"},
+            {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.47, 0.50, 0.51], "text": "1. 专题二选择题"},
+            {"id": "e4", "page": 1, "type": "text", "bbox": [0.08, 0.55, 0.50, 0.59], "text": "2. 专题二选择题"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 4)
+        # Verify section_path population
+        q1_t1 = next(b for b in blocks if b.question_number == "1" and "专题一" in str(b.section_path))
+        q1_t2 = next(b for b in blocks if b.question_number == "1" and "专题二" in str(b.section_path))
+        self.assertEqual(q1_t1.section_path, ("专题一", "一、选择题"))
+        self.assertEqual(q1_t2.section_path, ("专题二", "一、选择题"))
+        self.assertNotEqual(q1_t1.section_path, q1_t2.section_path)
+        # No duplicate warnings
+        all_warnings = _collect_all_warnings(blocks)
+        duplicate_warnings = [w for w in all_warnings if "duplicate_question_number" in w]
+        self.assertEqual(len(duplicate_warnings), 0,
+                         f"different section_paths should prevent false duplicates, got: {duplicate_warnings}")
+
+    def test_section_path_in_output(self):
+        """ADR 002: LayoutOwnershipBlock.section_path is populated correctly."""
+        elements = [
+            {"id": "t1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "专题一"},
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.11, 0.50, 0.15], "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.17, 0.50, 0.21], "text": "1. 题目"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].section_path, ("专题一", "一、选择题"))
+        self.assertEqual(blocks[0].section_title, "一、选择题")
+
+    def test_standard_section_no_nesting(self):
+        """ADR 002: standard sections stay flat when no nonstandard top-level."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "s2", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24], "text": "二、填空题"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30], "text": "1. 题目B"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 2)
+        q1 = next(b for b in blocks if b.question_number == "1" and b.section_title == "一、选择题")
+        q1b = next(b for b in blocks if b.question_number == "1" and b.section_title == "二、填空题")
+        self.assertEqual(q1.section_path, ("一、选择题",))
+        self.assertEqual(q1b.section_path, ("二、填空题",))
+        self.assertNotEqual(q1.section_path, q1b.section_path)
+        all_warnings = _collect_all_warnings(blocks)
+        duplicate_warnings = [w for w in all_warnings if "duplicate_question_number" in w]
+        self.assertEqual(len(duplicate_warnings), 0)
+
+    # ------------------------------------------------------------------
+    # section_hierarchy_suspected warning (ADR 002 behavior)
+    # ------------------------------------------------------------------
+
+    def test_section_hierarchy_suspected_resolved_by_nesting(self):
+        """ADR 002: section_hierarchy_suspected should NOT fire when nested
+        section_paths resolve the collision. 向量小题A/B/C each have different
+        paths, so the repeat question numbers are expected."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "向量小题A"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.18, 0.50, 0.22], "text": "2. 题目B"},
+            {"id": "s2", "page": 1, "type": "text", "bbox": [0.08, 0.28, 0.50, 0.31], "text": "向量小题B"},
+            {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.34, 0.50, 0.38], "text": "1. 题目C"},
+            {"id": "e4", "page": 1, "type": "text", "bbox": [0.08, 0.42, 0.50, 0.46], "text": "2. 题目D"},
+            {"id": "s3", "page": 1, "type": "text", "bbox": [0.08, 0.52, 0.50, 0.55], "text": "向量小题C"},
+            {"id": "e5", "page": 1, "type": "text", "bbox": [0.08, 0.58, 0.50, 0.62], "text": "1. 题目E"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 5)
+        all_warnings = _collect_all_warnings(blocks)
+        sh_warnings = [w for w in all_warnings if "section_hierarchy_suspected" in w]
+        self.assertEqual(len(sh_warnings), 0,
+                         f"ADR 002 nesting should resolve SH, got: {sh_warnings}")
+
+    def test_section_hierarchy_suspected_still_fires_on_unresolved(self):
+        """ADR 002: SH still fires when same number under SAME path >= 3 times."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "向量小题A"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.18, 0.50, 0.22], "text": "1. 题目B"},
+            {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30], "text": "1. 题目C"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        all_warnings = _collect_all_warnings(blocks)
+        sh_warnings = [w for w in all_warnings if "section_hierarchy_suspected" in w]
+        self.assertEqual(len(sh_warnings), 1,
+                         f"unresolved same-path duplicates should still fire SH, got: {all_warnings}")
+
+    def test_section_hierarchy_suspected_does_not_fire_without_nonstandard_markers(self):
+        """Standard sections only (一、二、) should NOT trigger the warning."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.18, 0.50, 0.22], "text": "1. 题目B（重复）"},
+            {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30], "text": "1. 题目C（重复）"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        all_warnings = _collect_all_warnings(blocks)
+        sh_warnings = [w for w in all_warnings if "section_hierarchy_suspected" in w]
+        self.assertEqual(len(sh_warnings), 0,
+                         f"should not fire with standard sections only, got: {sh_warnings}")
+
+    def test_section_hierarchy_suspected_does_not_fire_below_threshold(self):
+        """Only 2 occurrences of same number — below the >= 3 threshold."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.09], "text": "向量小题A"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题目A"},
+            {"id": "s2", "page": 1, "type": "text", "bbox": [0.08, 0.28, 0.50, 0.31], "text": "向量小题B"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.34, 0.50, 0.38], "text": "1. 题目B"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        all_warnings = _collect_all_warnings(blocks)
+        sh_warnings = [w for w in all_warnings if "section_hierarchy_suspected" in w]
+        self.assertEqual(len(sh_warnings), 0,
+                         f"should not fire with only 2 occurrences, got: {sh_warnings}")
+
+
 def _collect_all_warnings(blocks) -> list[str]:
     all_warnings: list[str] = []
     for b in blocks:

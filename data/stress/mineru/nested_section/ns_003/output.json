@@ -1,0 +1,132 @@
+[
+  {
+    "id": "top1",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.06,
+      0.5,
+      0.09
+    ],
+    "text": "专题一 向量小题训练",
+    "confidence": 0.98
+  },
+  {
+    "id": "subA",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.11,
+      0.42,
+      0.14
+    ],
+    "text": "向量小题A",
+    "confidence": 0.98
+  },
+  {
+    "id": "q1a",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.16,
+      0.42,
+      0.19
+    ],
+    "text": "1. 已知 $\\vec a=(1,2)$，求模。",
+    "confidence": 0.98
+  },
+  {
+    "id": "q2a",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.23,
+      0.42,
+      0.26
+    ],
+    "text": "2. 判断两向量是否平行。",
+    "confidence": 0.98
+  },
+  {
+    "id": "subB",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.33,
+      0.42,
+      0.36
+    ],
+    "text": "向量小题B",
+    "confidence": 0.98
+  },
+  {
+    "id": "q1b",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.38,
+      0.42,
+      0.41
+    ],
+    "text": "1. 已知 $\\vec b=(2,4)$，求单位向量。",
+    "confidence": 0.98
+  },
+  {
+    "id": "q2b",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.45,
+      0.42,
+      0.48
+    ],
+    "text": "2. 计算 $\\vec a\\cdot\\vec b$。",
+    "confidence": 0.98
+  },
+  {
+    "id": "subC",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.55,
+      0.42,
+      0.58
+    ],
+    "text": "向量小题C",
+    "confidence": 0.98
+  },
+  {
+    "id": "q1c",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.06,
+      0.6,
+      0.42,
+      0.63
+    ],
+    "text": "1. 如图，求投影长度。",
+    "confidence": 0.98
+  },
+  {
+    "id": "img1",
+    "page": 1,
+    "type": "image",
+    "bbox": [
+      0.12,
+      0.65,
+      0.36,
+      0.82
+    ],
+    "text": "",
+    "confidence": 0.98
+  }
+]
