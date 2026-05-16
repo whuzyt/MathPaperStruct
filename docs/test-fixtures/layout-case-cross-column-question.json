@@ -1,0 +1,14 @@
+{
+  "name": "question text drifts across columns",
+  "elements": [
+    {"id": "sec1", "page": 1, "type": "text", "bbox": [0.06, 0.10, 0.42, 0.13], "text": "一、选择题"},
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.06, 0.16, 0.42, 0.20], "text": "1. 左边题目"},
+    {"id": "e2_drift", "page": 1, "type": "text", "bbox": [0.56, 0.16, 0.92, 0.20], "text": "续：选项内容跑右边了"},
+    {"id": "e3", "page": 1, "type": "text", "bbox": [0.06, 0.26, 0.42, 0.30], "text": "2. 第二题"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_numbers": ["1", "2"],
+    "warnings": ["cross_column_question"]
+  }
+}

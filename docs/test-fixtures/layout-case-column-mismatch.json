@@ -1,0 +1,16 @@
+{
+  "name": "cross page column layout differs",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.06, 0.10, 0.42, 0.14], "text": "1. 第一题"},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.56, 0.10, 0.92, 0.14], "text": "2. 第二题"},
+    {"id": "e3", "page": 1, "type": "text", "bbox": [0.56, 0.82, 0.92, 0.86], "text": "续：第二题很长延续"},
+    {"id": "e4", "page": 2, "type": "text", "bbox": [0.06, 0.10, 0.50, 0.14], "text": "续：第二题跨页"},
+    {"id": "e5", "page": 2, "type": "text", "bbox": [0.06, 0.24, 0.50, 0.28], "text": "3. 第三题"}
+  ],
+  "expected": {
+    "question_count": 3,
+    "question_numbers": ["1", "2", "3"],
+    "question_pages": {"2": [1, 2]},
+    "warnings": ["cross_page_column_mismatch"]
+  }
+}

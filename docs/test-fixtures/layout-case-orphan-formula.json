@@ -1,0 +1,13 @@
+{
+  "name": "formula outside any question block",
+  "elements": [
+    {"id": "f_orphan", "page": 1, "type": "formula", "bbox": [0.08, 0.06, 0.50, 0.12], "text": "$y=3$"},
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24], "text": "1. 题一"},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.30, 0.50, 0.34], "text": "2. 题二"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_numbers": ["1", "2"],
+    "warnings": ["orphan_formula"]
+  }
+}

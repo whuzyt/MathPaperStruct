@@ -1,0 +1,14 @@
+{
+  "name": "full width image can belong across columns",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.06, 0.10, 0.40, 0.14], "text": "1. 如图，求函数交点。"},
+    {"id": "img1", "page": 1, "type": "image", "bbox": [0.10, 0.18, 0.88, 0.42], "text": ""},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.56, 0.48, 0.92, 0.52], "text": "2. 计算 $2+3$。"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "asset_assignments": {"img1": "1"},
+    "warnings": []
+  }
+}
+

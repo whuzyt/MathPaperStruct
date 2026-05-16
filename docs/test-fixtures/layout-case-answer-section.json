@@ -1,0 +1,15 @@
+{
+  "name": "answer section excluded from body ownership",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题干一"},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24], "text": "2. 题干二"},
+    {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.70, 0.50, 0.74], "text": "参考答案"},
+    {"id": "e4", "page": 1, "type": "text", "bbox": [0.08, 0.76, 0.50, 0.80], "text": "1. A"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "excluded_elements": ["e3", "e4"],
+    "warnings": []
+  }
+}
+

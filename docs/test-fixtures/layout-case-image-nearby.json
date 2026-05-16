@@ -1,0 +1,14 @@
+{
+  "name": "image belongs to visual cue question",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 如图，求阴影面积。"},
+    {"id": "img1", "page": 1, "type": "image", "bbox": [0.12, 0.16, 0.42, 0.38], "text": ""},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.45, 0.50, 0.49], "text": "2. 计算 $2^3$。"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "asset_assignments": {"img1": "1"},
+    "warnings": []
+  }
+}
+

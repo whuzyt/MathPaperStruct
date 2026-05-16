@@ -1,0 +1,14 @@
+{
+  "name": "question continues to next page",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.82, 0.50, 0.86], "text": "8. 解方程组。"},
+    {"id": "e2", "page": 2, "type": "text", "bbox": [0.08, 0.08, 0.50, 0.12], "text": "续：由代入法可得。"},
+    {"id": "e3", "page": 2, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24], "text": "9. 证明 $AB=CD$。"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_pages": {"8": [1, 2], "9": [2]},
+    "warnings": []
+  }
+}
+

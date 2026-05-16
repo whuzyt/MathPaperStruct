@@ -1,0 +1,13 @@
+{
+  "name": "OCR merged question number into previous line",
+  "elements": [
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. 题一"},
+    {"id": "e2_merged", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24], "text": "上题答案选A。 2. 已知 $x+1=2$，求 $x$。"},
+    {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.30, 0.50, 0.34], "text": "3. 题三"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_numbers": ["1", "3"],
+    "warnings": ["missing_anchor_suspected"]
+  }
+}
