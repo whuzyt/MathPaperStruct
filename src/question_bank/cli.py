@@ -51,6 +51,8 @@ def main(
             return _run_asset_generate(args, stdout, stderr)
         if args.asset_command == "list":
             return _run_asset_list(args, stdout, stderr)
+        if args.asset_command == "crop":
+            return _run_asset_crop(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -140,6 +142,13 @@ def _build_parser() -> argparse.ArgumentParser:
     asset_list.add_argument("--canonical", action="store_true",
                             help="List canonical asset candidates instead of raw assets.")
     asset_list.add_argument("--limit", type=int, default=100)
+
+    asset_crop = asset_sub.add_parser("crop", help="Crop assets from PDF.")
+    asset_crop.add_argument("--paper-id", required=True)
+    asset_crop.add_argument("--pdf", type=Path, required=True,
+                            help="Path to source PDF.")
+    asset_crop.add_argument("--output-dir", type=Path, default=Path("data/assets"),
+                            help="Root directory for cropped assets.")
 
     return parser
 
@@ -574,6 +583,83 @@ def _run_asset_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
             file=stdout,
         )
     return 0
+
+
+def _run_asset_crop(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    raw_assets = repository.list_raw_assets(paper_id=args.paper_id, limit=10000)
+    if not raw_assets:
+        print(f"No raw assets found for paper: {args.paper_id}", file=stderr)
+        return 2
+
+    from question_bank.services.pdf_cropper import CropResult, crop_pdf_assets
+    from question_bank.services.local_asset_store import store_crop_result
+
+    output_dir = args.output_dir.resolve()
+    print(f"Cropping {len(raw_assets)} assets from {args.pdf}…", file=stdout)
+
+    try:
+        results = crop_pdf_assets(str(args.pdf), raw_assets, str(output_dir))
+    except ImportError as exc:
+        print(str(exc), file=stderr)
+        return 2
+    except FileNotFoundError as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    success = 0
+    failed = 0
+
+    try:
+        for r in results:
+            if r.error is not None:
+                repository.update_raw_asset_crop(
+                    raw_asset_id=r.raw_asset_id,
+                    crop_path=None,
+                    storage_url=None,
+                    content_hash="",
+                    width=None,
+                    height=None,
+                    status="crop_failed",
+                )
+                failed += 1
+                print(f"  FAIL {r.raw_asset_id}: {r.error}", file=stderr)
+            else:
+                stored = store_crop_result(r, str(output_dir.resolve()), args.paper_id)
+                repository.update_raw_asset_crop(
+                    raw_asset_id=r.raw_asset_id,
+                    crop_path=stored.file_path,
+                    storage_url=stored.storage_url,
+                    content_hash=r.content_hash,
+                    width=stored.width,
+                    height=stored.height,
+                    status="active",
+                )
+                success += 1
+                print(
+                    f"  OK {r.raw_asset_id} "
+                    f"{r.width}x{r.height} "
+                    f"hash={r.content_hash}",
+                    file=stdout,
+                )
+        repository.connection.commit()
+    except Exception:
+        repository.connection.rollback()
+        raise
+
+    print(
+        f"\nDone: {success} succeeded, {failed} failed (out of {len(results)})",
+        file=stdout,
+    )
+    return 0 if failed == 0 else 1
 
 
 def _schema_paths() -> list[Path]:
