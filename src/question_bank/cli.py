@@ -57,6 +57,8 @@ def main(
             return _run_asset_phash(args, stdout, stderr)
         if args.asset_command == "visual-candidates":
             return _run_asset_visual_candidates(args, stdout, stderr)
+    if args.command == "paper" and args.paper_command == "ingest-full":
+        return _run_paper_ingest_full(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -161,6 +163,25 @@ def _build_parser() -> argparse.ArgumentParser:
                                     help="List visual duplicate candidates.")
     asset_vc.add_argument("--max-distance", type=int, default=8)
     asset_vc.add_argument("--limit", type=int, default=100)
+
+    # paper
+    paper = subparsers.add_parser("paper", help="Paper ingestion orchestrator.")
+    paper_sub = paper.add_subparsers(dest="paper_command")
+    paper_ingest = paper_sub.add_parser(
+        "ingest-full", help="Run full end-to-end paper ingestion pipeline."
+    )
+    paper_ingest.add_argument("--paper-id", required=True)
+    paper_ingest.add_argument("--pdf", type=Path, required=True,
+                              help="Path to source PDF.")
+    paper_ingest.add_argument("--work-dir", type=Path, required=True,
+                              help="Working directory for MinerU output and reports.")
+    paper_ingest.add_argument("--asset-dir", type=Path, default=Path("data/assets"),
+                              help="Root directory for cropped assets.")
+    paper_ingest.add_argument("--dry-run", action="store_true",
+                              help="Run without writing to database.")
+    paper_ingest.add_argument("--resume", action="store_true",
+                              help="Skip steps whose output already exists.")
+    paper_ingest.add_argument("--use-real-deepseek", action="store_true")
 
     return parser
 
@@ -762,6 +783,82 @@ def _run_asset_visual_candidates(args: argparse.Namespace, stdout: TextIO, stder
 
     print(f"\n{len(candidates)} visual candidate group(s) found.", file=stdout)
     return 0
+
+
+def _run_paper_ingest_full(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    settings = Settings.load()
+    try:
+        if args.dry_run:
+            repository = None
+        else:
+            try:
+                import psycopg
+            except ImportError:
+                print("psycopg is required without --dry-run. Install project dependencies.", file=stderr)
+                return 2
+
+            repository = PostgresQuestionBankRepository(
+                psycopg.connect(settings.database_url)
+            )
+
+        deepseek_client = _build_deepseek_client(args.use_real_deepseek, settings)
+
+        from question_bank.services.paper_orchestrator import ingest_paper_full
+
+        report = ingest_paper_full(
+            paper_id=args.paper_id,
+            pdf_path=str(args.pdf),
+            work_dir=str(args.work_dir),
+            asset_dir=str(args.asset_dir),
+            dry_run=args.dry_run,
+            resume=args.resume,
+            repository=repository,
+            deepseek_client=deepseek_client,
+            mineru_command=settings.mineru_command,
+        )
+
+        # Print summary
+        print(f"Paper: {report.paper_id}", file=stdout)
+        print(f"Status: {report.status}", file=stdout)
+        print(f"Steps: {report.counts.get('steps_total', 0)} total, "
+              f"{report.counts.get('steps_succeeded', 0)} succeeded, "
+              f"{report.counts.get('steps_warning', 0)} warning, "
+              f"{report.counts.get('steps_failed', 0)} failed, "
+              f"{report.counts.get('steps_skipped', 0)} skipped", file=stdout)
+        print(file=stdout)
+        for s in report.steps:
+            status_marker = {
+                "success": "OK",
+                "failed": "FAIL",
+                "skipped": "SKIP",
+                "warning": "WARN",
+            }.get(s.status, s.status.upper())
+            print(f"  [{status_marker}] {s.name} "
+                  f"(in={s.input_count} out={s.output_count})", file=stdout)
+            if s.error:
+                print(f"        error: {s.error}", file=stderr)
+            for w in s.warnings:
+                print(f"        warning: {w}", file=stderr)
+
+        if report.warnings:
+            print(f"\nWarnings ({len(report.warnings)}):", file=stderr)
+            for w in report.warnings:
+                print(f"  - {w}", file=stderr)
+
+        if report.errors:
+            print(f"\nErrors ({len(report.errors)}):", file=stderr)
+            for e in report.errors:
+                print(f"  - {e}", file=stderr)
+
+        report_path = args.work_dir / "run-report.json"
+        print(f"\nReport: {report_path}", file=stdout)
+
+        if report.status == "failed":
+            return 2
+        return 0
+    except (ValueError, RuntimeError, FileNotFoundError, OSError) as exc:
+        print(str(exc), file=stderr)
+        return 2
 
 
 def _schema_paths() -> list[Path]:

@@ -27,19 +27,31 @@ class LocalMinerURunner:
 
     def build_command(self, pdf_path: Path, output_dir: Path) -> list[str]:
         cmd = [self.command, "-p", str(pdf_path), "-o", str(output_dir)]
-        if self.enable_formula:
-            cmd.append("--enable-formula")
-        if self.enable_ocr:
-            cmd.append("--enable-ocr")
+        cmd.extend(["-f", "true" if self.enable_formula else "false"])
+        cmd.extend(["-m", "auto" if self.enable_ocr else "txt"])
         return cmd
 
     def parse_pdf(self, pdf_path: Path, output_dir: Path) -> MinerUResult:
         output_dir.mkdir(parents=True, exist_ok=True)
         subprocess.run(self.build_command(pdf_path, output_dir), check=True)
-        return MinerUResult(
-            output_dir=output_dir,
-            markdown_path=output_dir / "output.md",
-            raw_json_path=output_dir / "output.json",
-            assets_dir=output_dir / "images",
+
+        pdf_stem = pdf_path.stem
+
+        # MinerU 3.x nests output: output_dir/<pdf_name>/<method>/<pdf_name>.md
+        # The method directory varies by backend (auto, txt, ocr, hybrid_auto, etc.)
+        # Discover artifacts by globbing rather than hardcoding paths.
+        md_candidates = sorted(output_dir.rglob(f"{pdf_stem}.md"))
+        json_candidates = sorted(output_dir.rglob(f"{pdf_stem}_middle.json"))
+        # Fall back: old MinerU versions or alternative filenames
+        if not json_candidates:
+            json_candidates = sorted(output_dir.rglob("*.json"))
+        img_candidates = sorted(
+            d for d in output_dir.rglob("images") if d.is_dir()
         )
 
+        return MinerUResult(
+            output_dir=output_dir,
+            markdown_path=md_candidates[0] if md_candidates else None,
+            raw_json_path=json_candidates[0] if json_candidates else None,
+            assets_dir=img_candidates[0] if img_candidates else None,
+        )
