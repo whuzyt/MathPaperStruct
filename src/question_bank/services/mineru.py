@@ -41,8 +41,8 @@ class LocalMinerURunner:
                 text=True,
             )
         except subprocess.CalledProcessError as exc:
-            stderr_tail = exc.stderr.strip().split("\n")[-10:] if exc.stderr else []
-            detail = "; ".join(stderr_tail) if stderr_tail else exc.stderr or ""
+            stderr_tail = exc.stderr.strip().split("\n")[-6:] if exc.stderr else []
+            detail = "\n".join(stderr_tail) if stderr_tail else exc.stderr or ""
             raise RuntimeError(
                 f"MinerU exited with code {exc.returncode}: {detail}"
             ) from exc
