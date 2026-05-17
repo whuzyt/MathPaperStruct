@@ -214,14 +214,22 @@ def ingest_paper_full(
     work_path = Path(work_dir)
     work_path.mkdir(parents=True, exist_ok=True)
 
+    TOTAL_STEPS = 10
+    _step_counter = [0]  # mutable counter captured by run() closure
+
     def run(step_fn, *args, **kwargs):
+        _step_counter[0] += 1
+        step_name = step_fn.__name__.replace("_step_", "")
+        n = _step_counter[0]
+        print(f"  [{n}/{TOTAL_STEPS}] {step_name}...", end="", flush=True)
         try:
             result = step_fn(*args, **kwargs)
             steps.append(result)
+            print(f" {result.status.upper()}")
             return result
         except Exception as exc:
-            name = step_fn.__name__.replace("_step_", "")
-            steps.append(_make_result(name, "failed", _now_iso(), error=str(exc)))
+            steps.append(_make_result(step_name, "failed", _now_iso(), error=str(exc)))
+            print(" FAIL")
             return None
 
     def last_failed_critical() -> bool:
