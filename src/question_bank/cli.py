@@ -46,6 +46,11 @@ def main(
             return _run_canonicalize_list(args, stdout, stderr)
         if args.canon_command == "rollback":
             return _run_canonicalize_rollback(args, stdout, stderr)
+    if args.command == "review" and args.review_command == "asset":
+        if args.asset_command == "generate":
+            return _run_asset_generate(args, stdout, stderr)
+        if args.asset_command == "list":
+            return _run_asset_list(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -120,6 +125,21 @@ def _build_parser() -> argparse.ArgumentParser:
     canon_rollback = canon_sub.add_parser("rollback", help="Rollback a canonical question.")
     canon_rollback.add_argument("--canonical-id", required=True)
     canon_rollback.add_argument("--created-by", required=True)
+
+    # review asset
+    asset = review_subparsers.add_parser("asset", help="Asset identity and canonicalization.")
+    asset_sub = asset.add_subparsers(dest="asset_command")
+
+    asset_gen = asset_sub.add_parser("generate", help="Generate raw assets from paper.")
+    asset_gen.add_argument("--paper-id", required=True)
+    asset_gen.add_argument("--elements-json", type=Path, required=True,
+                           help="Path to MinerU output.json")
+
+    asset_list = asset_sub.add_parser("list", help="List raw assets or canonical candidates.")
+    asset_list.add_argument("--paper-id", default=None)
+    asset_list.add_argument("--canonical", action="store_true",
+                            help="List canonical asset candidates instead of raw assets.")
+    asset_list.add_argument("--limit", type=int, default=100)
 
     return parser
 
@@ -468,6 +488,91 @@ def _run_canonicalize_rollback(args: argparse.Namespace, stdout: TextIO, stderr:
         return 2
 
     print(f"Canonical question rolled back: {args.canonical_id}", file=stdout)
+    return 0
+
+
+def _run_asset_generate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    import json as _json
+
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    if not args.elements_json.exists():
+        print(f"Elements JSON not found: {args.elements_json}", file=stderr)
+        return 2
+
+    raw_elements = _json.loads(args.elements_json.read_text(encoding="utf-8"))
+
+    from question_bank.services.asset_identity import _Element
+    from question_bank.services.layout_ownership import layout_ownership
+
+    elements_by_id: dict[str, _Element] = {}
+    for elem in raw_elements:
+        eid = elem.get("id", "")
+        bbox = elem.get("bbox", [0, 0, 0, 0])
+        elements_by_id[eid] = _Element(
+            id=eid,
+            page=elem.get("page", 1),
+            type=elem.get("type", ""),
+            bbox=tuple(bbox) if len(bbox) == 4 else (0.0, 0.0, 0.0, 0.0),
+            text=elem.get("text", ""),
+            confidence=elem.get("confidence", 0.0),
+            width=elem.get("width", 0.0),
+            height=elem.get("height", 0.0),
+        )
+
+    blocks = layout_ownership(args.paper_id, raw_elements)
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    try:
+        result = repository.identify_paper_assets(args.paper_id, blocks, elements_by_id)
+    except Exception as exc:
+        print(f"Asset generation failed: {exc}", file=stderr)
+        return 2
+
+    print(f"Raw assets: {len(result['raw_assets'])}", file=stdout)
+    print(f"Question-asset links: {len(result['links'])}", file=stdout)
+    for ra in result["raw_assets"]:
+        print(
+            f"  {ra['id']}\ttype={ra['asset_type']}\thash={ra['content_hash']}",
+            file=stdout,
+        )
+    return 0
+
+
+def _run_asset_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    if args.canonical:
+        candidates = repository.list_asset_candidates()
+        for c in candidates:
+            ca = c["canonical"]
+            variants = c["variants"]
+            print(
+                f"{ca['id']}\ttype={ca['asset_type']}\t"
+                f"content_hash={ca['content_hash']}\tvariants={len(variants)}",
+                file=stdout,
+            )
+        return 0
+
+    raw_assets = repository.list_raw_assets(paper_id=args.paper_id, limit=args.limit)
+    for ra in raw_assets:
+        print(
+            f"{ra['id']}\tpaper={ra['paper_id']}\t"
+            f"type={ra['asset_type']}\thash={ra['content_hash']}",
+            file=stdout,
+        )
     return 0
 
 

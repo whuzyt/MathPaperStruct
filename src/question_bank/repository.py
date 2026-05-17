@@ -12,6 +12,11 @@ from question_bank.services.canonicalize import (
     CanonicalizationEvent,
     QuestionVariant,
 )
+from question_bank.services.asset_canonicalize import (
+    AssetVariant,
+    CanonicalAsset,
+)
+from question_bank.services.asset_identity import RawAsset
 from question_bank.services.duplicate_review import DuplicateCandidateGroup, ReviewDecision
 
 
@@ -405,6 +410,196 @@ class PostgresQuestionBankRepository:
         except Exception:
             self.connection.rollback()
             raise
+
+    # ── ADR 006: Asset Identity & Canonicalization ────────────────────────
+
+    def save_raw_asset(self, ra: RawAsset) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_RAW_ASSET,
+            {
+                "id": ra.id,
+                "paper_id": ra.paper_id,
+                "page": ra.page,
+                "bbox_json": ra.bbox_json,
+                "asset_type": ra.asset_type,
+                "source_element_id": ra.source_element_id,
+                "crop_path": ra.crop_path,
+                "storage_url": ra.storage_url,
+                "perceptual_hash": ra.perceptual_hash,
+                "content_hash": ra.content_hash,
+                "width": ra.width,
+                "height": ra.height,
+                "status": ra.status,
+            },
+        )
+
+    def save_question_asset_link(self, link: dict) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_QUESTION_ASSET_LINK,
+            {
+                "id": link["id"],
+                "question_id": link.get("question_id"),
+                "canonical_question_id": link.get("canonical_question_id"),
+                "raw_asset_id": link["raw_asset_id"],
+                "role": link.get("role", "figure"),
+                "confidence": link.get("confidence", 1.0),
+                "needs_review": link.get("needs_review", False),
+            },
+        )
+
+    def save_canonical_asset(self, ca: CanonicalAsset) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_CANONICAL_ASSET,
+            {
+                "id": ca.id,
+                "asset_fingerprint": ca.asset_fingerprint,
+                "representative_raw_asset_id": ca.representative_raw_asset_id,
+                "asset_type": ca.asset_type,
+                "storage_url": ca.storage_url,
+                "perceptual_hash": ca.perceptual_hash,
+                "content_hash": ca.content_hash,
+                "status": ca.status,
+            },
+        )
+
+    def save_asset_variant(self, av: AssetVariant) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_ASSET_VARIANT,
+            {
+                "id": av.id,
+                "canonical_asset_id": av.canonical_asset_id,
+                "raw_asset_id": av.raw_asset_id,
+                "transform_json": av.transform_json,
+                "similarity": av.similarity,
+                "is_active": av.is_active,
+            },
+        )
+
+    def identify_paper_assets(
+        self,
+        paper_id: str,
+        blocks: list,
+        elements_by_id: dict,
+    ) -> dict:
+        from question_bank.services.asset_identity import identify_raw_assets
+
+        raw_assets, links = identify_raw_assets(paper_id, blocks, elements_by_id)
+
+        try:
+            for ra in raw_assets:
+                self.save_raw_asset(ra)
+            for link in links:
+                self.save_question_asset_link(link)
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+        return {
+            "raw_assets": [_raw_asset_to_dict(ra) for ra in raw_assets],
+            "links": links,
+        }
+
+    def list_raw_assets(
+        self, paper_id: str | None = None, limit: int = 100
+    ) -> list[dict]:
+        cursor = self.connection.cursor()
+        if paper_id:
+            cursor.execute(
+                _SELECT_RAW_ASSETS_BY_PAPER,
+                {"paper_id": paper_id, "limit": limit},
+            )
+        else:
+            cursor.execute(_SELECT_ALL_RAW_ASSETS, {"limit": limit})
+        return [_raw_asset_from_row(row) for row in cursor.fetchall()]
+
+    def list_asset_candidates(self, min_candidates: int = 2) -> list[dict]:
+        from question_bank.services.asset_canonicalize import (
+            generate_canonical_asset_candidates,
+        )
+
+        raw_assets = self.list_raw_assets(limit=10000)
+        candidates = generate_canonical_asset_candidates(
+            raw_assets, min_candidates=min_candidates
+        )
+        return [
+            {
+                "canonical": _canonical_asset_to_dict(c["canonical"]),
+                "variants": [_asset_variant_to_dict(v) for v in c["variants"]],
+            }
+            for c in candidates
+        ]
+
+    def generate_canonical_assets(self, created_by: str = "") -> list[dict]:
+        from question_bank.services.asset_canonicalize import (
+            generate_canonical_asset_candidates,
+        )
+
+        raw_assets = self.list_raw_assets(limit=10000)
+        candidates = generate_canonical_asset_candidates(raw_assets)
+
+        results: list[dict] = []
+        try:
+            for c in candidates:
+                self.save_canonical_asset(c["canonical"])
+                for v in c["variants"]:
+                    self.save_asset_variant(v)
+                results.append({
+                    "canonical": _canonical_asset_to_dict(c["canonical"]),
+                    "variants": [_asset_variant_to_dict(v) for v in c["variants"]],
+                })
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+        return results
+
+
+def _raw_asset_to_dict(ra: RawAsset) -> dict:
+    return {
+        "id": ra.id,
+        "paper_id": ra.paper_id,
+        "page": ra.page,
+        "bbox_json": ra.bbox_json,
+        "asset_type": ra.asset_type,
+        "source_element_id": ra.source_element_id,
+        "crop_path": ra.crop_path,
+        "storage_url": ra.storage_url,
+        "perceptual_hash": ra.perceptual_hash,
+        "content_hash": ra.content_hash,
+        "width": ra.width,
+        "height": ra.height,
+        "status": ra.status,
+    }
+
+
+def _canonical_asset_to_dict(ca: CanonicalAsset) -> dict:
+    return {
+        "id": ca.id,
+        "asset_fingerprint": ca.asset_fingerprint,
+        "representative_raw_asset_id": ca.representative_raw_asset_id,
+        "asset_type": ca.asset_type,
+        "storage_url": ca.storage_url,
+        "perceptual_hash": ca.perceptual_hash,
+        "content_hash": ca.content_hash,
+        "status": ca.status,
+    }
+
+
+def _asset_variant_to_dict(av: AssetVariant) -> dict:
+    return {
+        "id": av.id,
+        "canonical_asset_id": av.canonical_asset_id,
+        "raw_asset_id": av.raw_asset_id,
+        "transform_json": av.transform_json,
+        "similarity": av.similarity,
+        "is_active": av.is_active,
+    }
 
 
 def _canonical_to_dict(cq: CanonicalQuestion) -> dict:
@@ -854,6 +1049,127 @@ WHERE canonical_question_id = %(canonical_id)s
 ORDER BY paper_id
 """
 
+# ---------------------------------------------------------------------------
+# ADR 006: Asset Canonicalization SQL
+# ---------------------------------------------------------------------------
+
+_INSERT_RAW_ASSET = """
+INSERT INTO raw_assets (
+  id, paper_id, page, bbox_json, asset_type, source_element_id,
+  crop_path, storage_url, perceptual_hash, content_hash,
+  width, height, status
+) VALUES (
+  %(id)s, %(paper_id)s, %(page)s, %(bbox_json)s, %(asset_type)s,
+  %(source_element_id)s, %(crop_path)s, %(storage_url)s,
+  %(perceptual_hash)s, %(content_hash)s, %(width)s, %(height)s,
+  %(status)s
+) ON CONFLICT (id) DO UPDATE SET
+  bbox_json = EXCLUDED.bbox_json,
+  storage_url = EXCLUDED.storage_url,
+  content_hash = EXCLUDED.content_hash,
+  width = EXCLUDED.width,
+  height = EXCLUDED.height
+"""
+
+_INSERT_QUESTION_ASSET_LINK = """
+INSERT INTO question_asset_links (
+  id, question_id, canonical_question_id, raw_asset_id,
+  role, confidence, needs_review
+) VALUES (
+  %(id)s, %(question_id)s, %(canonical_question_id)s, %(raw_asset_id)s,
+  %(role)s, %(confidence)s, %(needs_review)s
+) ON CONFLICT (id) DO UPDATE SET
+  question_id = EXCLUDED.question_id,
+  canonical_question_id = EXCLUDED.canonical_question_id
+"""
+
+_INSERT_CANONICAL_ASSET = """
+INSERT INTO canonical_assets (
+  id, asset_fingerprint, representative_raw_asset_id, asset_type,
+  storage_url, perceptual_hash, content_hash, status
+) VALUES (
+  %(id)s, %(asset_fingerprint)s, %(representative_raw_asset_id)s,
+  %(asset_type)s, %(storage_url)s, %(perceptual_hash)s,
+  %(content_hash)s, %(status)s
+) ON CONFLICT (id) DO UPDATE SET
+  asset_fingerprint = EXCLUDED.asset_fingerprint,
+  representative_raw_asset_id = EXCLUDED.representative_raw_asset_id,
+  storage_url = EXCLUDED.storage_url,
+  status = EXCLUDED.status,
+  updated_at = now()
+"""
+
+_INSERT_ASSET_VARIANT = """
+INSERT INTO asset_variants (
+  id, canonical_asset_id, raw_asset_id, transform_json,
+  similarity, is_active
+) VALUES (
+  %(id)s, %(canonical_asset_id)s, %(raw_asset_id)s,
+  %(transform_json)s, %(similarity)s, %(is_active)s
+) ON CONFLICT (id) DO UPDATE SET
+  similarity = EXCLUDED.similarity,
+  is_active = EXCLUDED.is_active
+"""
+
+_SELECT_RAW_ASSETS_BY_PAPER = """
+SELECT
+  id, paper_id, page, bbox_json, asset_type, source_element_id,
+  crop_path, storage_url, perceptual_hash, content_hash,
+  width, height, status, created_at
+FROM raw_assets
+WHERE paper_id = %(paper_id)s
+ORDER BY page, id
+LIMIT %(limit)s
+"""
+
+_SELECT_RAW_ASSETS_BY_CONTENT_HASH = """
+SELECT
+  id, paper_id, page, bbox_json, asset_type, source_element_id,
+  crop_path, storage_url, perceptual_hash, content_hash,
+  width, height, status, created_at
+FROM raw_assets
+WHERE content_hash = %(content_hash)s
+ORDER BY paper_id
+"""
+
+_SELECT_ALL_RAW_ASSETS = """
+SELECT
+  id, paper_id, page, bbox_json, asset_type, source_element_id,
+  crop_path, storage_url, perceptual_hash, content_hash,
+  width, height, status, created_at
+FROM raw_assets
+ORDER BY created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_CANONICAL_ASSETS = """
+SELECT
+  id, asset_fingerprint, representative_raw_asset_id, asset_type,
+  storage_url, perceptual_hash, content_hash, status,
+  created_at, updated_at
+FROM canonical_assets
+ORDER BY created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_CANONICAL_ASSET_BY_ID = """
+SELECT
+  id, asset_fingerprint, representative_raw_asset_id, asset_type,
+  storage_url, perceptual_hash, content_hash, status,
+  created_at, updated_at
+FROM canonical_assets
+WHERE id = %(id)s
+"""
+
+_SELECT_ASSET_VARIANTS_BY_CANONICAL = """
+SELECT
+  id, canonical_asset_id, raw_asset_id, transform_json,
+  similarity, is_active, created_at
+FROM asset_variants
+WHERE canonical_asset_id = %(canonical_id)s
+ORDER BY raw_asset_id
+"""
+
 
 def _dup_group_from_row(row: Any) -> dict:
     if isinstance(row, dict):
@@ -985,4 +1301,98 @@ def _event_from_row(row: Any) -> dict:
         "id": id_, "canonical_question_id": cqid, "group_id": gid,
         "event_type": etype, "payload_json": payload,
         "created_by": created_by, "created_at": str(created_at),
+    }
+
+
+def _raw_asset_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "paper_id": row["paper_id"],
+            "page": row["page"], "bbox_json": row["bbox_json"],
+            "asset_type": row["asset_type"],
+            "source_element_id": row["source_element_id"],
+            "crop_path": row.get("crop_path"),
+            "storage_url": row.get("storage_url"),
+            "perceptual_hash": row.get("perceptual_hash", ""),
+            "content_hash": row["content_hash"],
+            "width": row.get("width"), "height": row.get("height"),
+            "status": row["status"],
+            "created_at": str(row.get("created_at", "")),
+        }
+    (
+        id_, paper_id, page, bbox_json, asset_type, source_element_id,
+        crop_path, storage_url, perceptual_hash, content_hash,
+        width, height, status, created_at,
+    ) = row
+    return {
+        "id": id_, "paper_id": paper_id, "page": page,
+        "bbox_json": bbox_json, "asset_type": asset_type,
+        "source_element_id": source_element_id,
+        "crop_path": crop_path, "storage_url": storage_url,
+        "perceptual_hash": perceptual_hash or "",
+        "content_hash": content_hash, "width": width, "height": height,
+        "status": status, "created_at": str(created_at),
+    }
+
+
+def _question_asset_link_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "question_id": row.get("question_id"),
+            "canonical_question_id": row.get("canonical_question_id"),
+            "raw_asset_id": row["raw_asset_id"], "role": row["role"],
+            "confidence": row["confidence"], "needs_review": row["needs_review"],
+            "created_at": str(row.get("created_at", "")),
+        }
+    id_, qid, cqid, ra_id, role, confidence, needs_review, created_at = row
+    return {
+        "id": id_, "question_id": qid, "canonical_question_id": cqid,
+        "raw_asset_id": ra_id, "role": role,
+        "confidence": confidence, "needs_review": needs_review,
+        "created_at": str(created_at),
+    }
+
+
+def _canonical_asset_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "asset_fingerprint": row["asset_fingerprint"],
+            "representative_raw_asset_id": row["representative_raw_asset_id"],
+            "asset_type": row["asset_type"],
+            "storage_url": row.get("storage_url"),
+            "perceptual_hash": row.get("perceptual_hash", ""),
+            "content_hash": row["content_hash"],
+            "status": row["status"],
+            "created_at": str(row.get("created_at", "")),
+            "updated_at": str(row.get("updated_at", "")),
+        }
+    (
+        id_, fingerprint, rep_id, atype, storage_url,
+        perceptual_hash, content_hash, status, created_at, updated_at,
+    ) = row
+    return {
+        "id": id_, "asset_fingerprint": fingerprint,
+        "representative_raw_asset_id": rep_id,
+        "asset_type": atype, "storage_url": storage_url,
+        "perceptual_hash": perceptual_hash or "",
+        "content_hash": content_hash, "status": status,
+        "created_at": str(created_at), "updated_at": str(updated_at),
+    }
+
+
+def _asset_variant_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "canonical_asset_id": row["canonical_asset_id"],
+            "raw_asset_id": row["raw_asset_id"],
+            "transform_json": row.get("transform_json", "{}"),
+            "similarity": row.get("similarity"),
+            "is_active": row["is_active"],
+            "created_at": str(row.get("created_at", "")),
+        }
+    id_, ca_id, ra_id, transform_json, similarity, is_active, created_at = row
+    return {
+        "id": id_, "canonical_asset_id": ca_id, "raw_asset_id": ra_id,
+        "transform_json": transform_json, "similarity": similarity,
+        "is_active": is_active, "created_at": str(created_at),
     }

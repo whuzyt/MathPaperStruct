@@ -93,6 +93,7 @@ class CLITest(unittest.TestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS papers", all_sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS duplicate_candidate_groups", all_sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS canonical_questions", all_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS raw_assets", all_sql)
         self.assertTrue(fake_psycopg.connection.committed)
 
     def test_review_list_prints_review_queue_items(self):
