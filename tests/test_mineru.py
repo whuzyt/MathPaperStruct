@@ -109,7 +109,9 @@ class LocalMinerURunnerTest(unittest.TestCase):
             self.assertIsNone(result.assets_dir)
 
     def test_parse_pdf_raises_on_subprocess_error(self):
-        """If MinerU exits non-zero, the CalledProcessError propagates."""
+        """If MinerU exits non-zero, the error includes exit code and stderr."""
+        import subprocess as sp
+
         runner = LocalMinerURunner(command="mineru")
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -117,10 +119,9 @@ class LocalMinerURunnerTest(unittest.TestCase):
             pdf_path = Path(tmpdir) / "bad.pdf"
             pdf_path.write_text("bad")
 
-            with mock.patch(
-                "subprocess.run", side_effect=Exception("mineru crashed")
-            ):
-                with self.assertRaisesRegex(Exception, "mineru crashed"):
+            error = sp.CalledProcessError(1, ["mineru"], stderr="model download failed\nfatal error")
+            with mock.patch("subprocess.run", side_effect=error):
+                with self.assertRaisesRegex(RuntimeError, "MinerU exited with code 1"):
                     runner.parse_pdf(pdf_path, out_dir)
 
 

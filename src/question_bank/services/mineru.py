@@ -33,7 +33,19 @@ class LocalMinerURunner:
 
     def parse_pdf(self, pdf_path: Path, output_dir: Path) -> MinerUResult:
         output_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run(self.build_command(pdf_path, output_dir), check=True)
+        try:
+            subprocess.run(
+                self.build_command(pdf_path, output_dir),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError as exc:
+            stderr_tail = exc.stderr.strip().split("\n")[-10:] if exc.stderr else []
+            detail = "; ".join(stderr_tail) if stderr_tail else exc.stderr or ""
+            raise RuntimeError(
+                f"MinerU exited with code {exc.returncode}: {detail}"
+            ) from exc
 
         pdf_stem = pdf_path.stem
 
