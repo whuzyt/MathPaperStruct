@@ -188,6 +188,77 @@ class CLITest(unittest.TestCase):
         update_sqls = [s for s in cursor._all_sql if "UPDATE raw_assets" in s]
         self.assertEqual(len(update_sqls), 1)
 
+    def test_review_asset_phash_parses_args_and_flows(self):
+        import json as _json
+
+        raw_rows = [
+            {
+                "id": "ra_001", "paper_id": "paper_01", "page": 1,
+                "bbox_json": _json.dumps([0.1, 0.1, 0.5, 0.5]),
+                "asset_type": "image", "source_element_id": "e_001",
+                "crop_path": "/tmp/crop.png", "storage_url": "local://...",
+                "perceptual_hash": "", "content_hash": "ch_abc",
+                "width": 200, "height": 150, "status": "active",
+                "created_at": "2026-01-01",
+            },
+        ]
+        fake_psycopg = FakePsycopgModule(rows=raw_rows)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+            with patch(
+                "question_bank.services.image_phash.compute_phash",
+                return_value="deadbeef00000000",
+            ):
+                exit_code = main(
+                    ["review", "asset", "phash", "--paper-id", "paper_01"],
+                    stdout=stdout,
+                    stderr=stderr,
+                )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Done: 1 hashed", output)
+        self.assertIn("phash=deadbeef00000000", output)
+
+    def test_review_asset_visual_candidates_parses_args_and_flows(self):
+        import json as _json
+
+        raw_rows = [
+            {
+                "id": "ra_001", "paper_id": "paper_01", "page": 1,
+                "bbox_json": _json.dumps([0.1, 0.1, 0.5, 0.5]),
+                "asset_type": "image", "source_element_id": "e_001",
+                "crop_path": "/tmp/crop1.png", "storage_url": "local://...",
+                "perceptual_hash": "000000000000000f", "content_hash": "ch_a",
+                "width": 200, "height": 150, "status": "active",
+                "created_at": "2026-01-01",
+            },
+            {
+                "id": "ra_002", "paper_id": "paper_02", "page": 2,
+                "bbox_json": _json.dumps([0.2, 0.2, 0.6, 0.6]),
+                "asset_type": "image", "source_element_id": "e_002",
+                "crop_path": "/tmp/crop2.png", "storage_url": "local://...",
+                "perceptual_hash": "000000000000000e", "content_hash": "ch_b",
+                "width": 180, "height": 140, "status": "active",
+                "created_at": "2026-01-01",
+            },
+        ]
+        fake_psycopg = FakePsycopgModule(rows=raw_rows)
+
+        stdout = io.StringIO()
+        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+            exit_code = main(
+                ["review", "asset", "visual-candidates", "--max-distance", "8"],
+                stdout=stdout,
+            )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("visual candidate group", output.lower())
+
 
 class FakePsycopgModule:
     def __init__(self, rows=None):

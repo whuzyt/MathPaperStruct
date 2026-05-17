@@ -585,6 +585,15 @@ class PostgresQuestionBankRepository:
             },
         )
 
+    # ── ADR 008: pHash persistence ──────────────────────────────────────
+
+    def update_raw_asset_phash(self, raw_asset_id: str, perceptual_hash: str) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _UPDATE_RAW_ASSET_PHASH,
+            {"id": raw_asset_id, "perceptual_hash": perceptual_hash},
+        )
+
 
 def _raw_asset_to_dict(ra: RawAsset) -> dict:
     return {
@@ -1205,6 +1214,12 @@ UPDATE raw_assets SET
   width = %(width)s,
   height = %(height)s,
   status = %(status)s
+WHERE id = %(id)s
+"""
+
+_UPDATE_RAW_ASSET_PHASH = """
+UPDATE raw_assets SET
+  perceptual_hash = %(perceptual_hash)s
 WHERE id = %(id)s
 """
 
