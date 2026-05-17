@@ -119,6 +119,75 @@ class CLITest(unittest.TestCase):
         self.assertIn("too_few_choices", output)
         self.assertIn("fake_client_output", output)
 
+    def test_review_asset_crop_parses_args_and_flows(self):
+        import json as _json
+
+        raw_rows = [
+            {
+                "id": "ra_001", "paper_id": "paper_01", "page": 1,
+                "bbox_json": _json.dumps([0.1, 0.1, 0.5, 0.5]),
+                "asset_type": "image", "source_element_id": "e_001",
+                "crop_path": None, "storage_url": None,
+                "perceptual_hash": "", "content_hash": "ch_old",
+                "width": None, "height": None, "status": "active",
+                "created_at": "2026-01-01",
+            },
+        ]
+        fake_psycopg = FakePsycopgModule(rows=raw_rows)
+
+        from question_bank.services.pdf_cropper import CropResult
+
+        fake_crop_result = CropResult(
+            raw_asset_id="ra_001", page=1,
+            bbox=(0.1, 0.1, 0.5, 0.5),
+            crop_path="/tmp/crop.png",
+            content_hash="abc123",
+            width=200, height=150, error=None,
+        )
+
+        from question_bank.services.local_asset_store import StoredAsset
+
+        fake_stored = StoredAsset(
+            raw_asset_id="ra_001",
+            storage_url="local://assets/paper_01/ra_001.png",
+            file_path="/tmp/assets/paper_01/ra_001.png",
+            content_hash="abc123",
+            width=200, height=150,
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+            with patch(
+                "question_bank.services.pdf_cropper.crop_pdf_assets",
+                return_value=[fake_crop_result],
+            ):
+                with patch(
+                    "question_bank.services.local_asset_store.store_crop_result",
+                    return_value=fake_stored,
+                ):
+                    exit_code = main(
+                        [
+                            "review", "asset", "crop",
+                            "--paper-id", "paper_01",
+                            "--pdf", "/tmp/test.pdf",
+                            "--output-dir", "/tmp/assets",
+                        ],
+                        stdout=stdout,
+                        stderr=stderr,
+                    )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Done: 1 succeeded, 0 failed", output)
+        self.assertIn("Cropping 1 assets", output)
+
+        # Verify UPDATE was executed
+        cursor = fake_psycopg.connection.cursor_obj
+        update_sqls = [s for s in cursor._all_sql if "UPDATE raw_assets" in s]
+        self.assertEqual(len(update_sqls), 1)
+
 
 class FakePsycopgModule:
     def __init__(self, rows=None):

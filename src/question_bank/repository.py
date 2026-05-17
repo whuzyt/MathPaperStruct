@@ -559,6 +559,32 @@ class PostgresQuestionBankRepository:
 
         return results
 
+    # ── ADR 007: Crop persistence ────────────────────────────────────────
+
+    def update_raw_asset_crop(
+        self,
+        raw_asset_id: str,
+        crop_path: str | None,
+        storage_url: str | None,
+        content_hash: str,
+        width: int | None,
+        height: int | None,
+        status: str,
+    ) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _UPDATE_RAW_ASSET_CROP,
+            {
+                "id": raw_asset_id,
+                "crop_path": crop_path,
+                "storage_url": storage_url,
+                "content_hash": content_hash,
+                "width": width,
+                "height": height,
+                "status": status,
+            },
+        )
+
 
 def _raw_asset_to_dict(ra: RawAsset) -> dict:
     return {
@@ -1168,6 +1194,18 @@ SELECT
 FROM asset_variants
 WHERE canonical_asset_id = %(canonical_id)s
 ORDER BY raw_asset_id
+"""
+
+# ADR 007: Crop persistence
+_UPDATE_RAW_ASSET_CROP = """
+UPDATE raw_assets SET
+  crop_path = %(crop_path)s,
+  storage_url = %(storage_url)s,
+  content_hash = %(content_hash)s,
+  width = %(width)s,
+  height = %(height)s,
+  status = %(status)s
+WHERE id = %(id)s
 """
 
 
