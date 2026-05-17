@@ -39,6 +39,13 @@ def main(
             return _run_duplicate_list(args, stdout, stderr)
         if args.duplicate_command == "decide":
             return _run_duplicate_decide(args, stdout, stderr)
+    if args.command == "review" and args.review_command == "canonicalize":
+        if args.canon_command == "generate":
+            return _run_canonicalize_generate(args, stdout, stderr)
+        if args.canon_command == "list":
+            return _run_canonicalize_list(args, stdout, stderr)
+        if args.canon_command == "rollback":
+            return _run_canonicalize_rollback(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -97,6 +104,22 @@ def _build_parser() -> argparse.ArgumentParser:
     dup_decide.add_argument("--canonical-question-id", default=None)
     dup_decide.add_argument("--reviewer", default="")
     dup_decide.add_argument("--reason", default="")
+
+    # review canonicalize
+    canon = review_subparsers.add_parser(
+        "canonicalize", help="Generate canonical question from resolved group."
+    )
+    canon_sub = canon.add_subparsers(dest="canon_command")
+    canon_gen = canon_sub.add_parser("generate", help="Generate canonical question.")
+    canon_gen.add_argument("--group-id", required=True)
+    canon_gen.add_argument("--created-by", required=True)
+    canon_list = canon_sub.add_parser("list", help="List canonical questions.")
+    canon_list.add_argument("--status", default=None)
+    canon_list.add_argument("--canonical-id")
+    canon_list.add_argument("--limit", type=int, default=50)
+    canon_rollback = canon_sub.add_parser("rollback", help="Rollback a canonical question.")
+    canon_rollback.add_argument("--canonical-id", required=True)
+    canon_rollback.add_argument("--created-by", required=True)
 
     return parser
 
@@ -364,6 +387,87 @@ def _run_duplicate_decide(args: argparse.Namespace, stdout: TextIO, stderr: Text
     )
     repository.save_review_decision(decision)
     print(f"Decision recorded: group={args.group_id} decision={args.decision}", file=stdout)
+    return 0
+
+
+def _run_canonicalize_generate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    try:
+        result = repository.canonicalize_group(args.group_id, args.created_by)
+    except ValueError as exc:
+        print(str(exc), file=stderr)
+        return 2
+
+    cq = result["canonical"]
+    variants = result["variants"]
+    event = result.get("event")
+
+    print(f"Canonical question: {cq['id']}", file=stdout)
+    print(f"  Representative: {cq['representative_item_id']}", file=stdout)
+    print(f"  Status: {cq['status']}", file=stdout)
+    print(f"  Variants: {len(variants)}", file=stdout)
+    if event:
+        print(f"  Event: {event['event_type']}", file=stdout)
+    for v in variants:
+        print(f"    - {v['paper_id']} #{v['source_position_key']}", file=stdout)
+    return 0
+
+
+def _run_canonicalize_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    if args.canonical_id:
+        cq = repository.get_canonical_question(args.canonical_id)
+        if cq is None:
+            print(f"Canonical question not found: {args.canonical_id}", file=stderr)
+            return 2
+        import json as _json
+        print(_json.dumps(cq, ensure_ascii=False, indent=2), file=stdout)
+        return 0
+
+    questions = repository.list_canonical_questions(
+        status=args.status, limit=args.limit
+    )
+    for cq in questions:
+        print(
+            f"{cq['id']}\t{cq['status']}\t"
+            f"rep={cq['representative_item_id']}\t"
+            f"group={cq['created_from_group_id']}",
+            file=stdout,
+        )
+    return 0
+
+
+def _run_canonicalize_rollback(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    try:
+        repository.rollback_canonical(args.canonical_id, args.created_by)
+    except Exception as exc:
+        print(f"Rollback failed: {exc}", file=stderr)
+        return 2
+
+    print(f"Canonical question rolled back: {args.canonical_id}", file=stdout)
     return 0
 
 

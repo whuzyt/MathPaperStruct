@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from question_bank.domain.models import QualityIssue, Question, QuestionAsset, QuestionBlock
 from question_bank.pipeline import ProcessingResult
+from question_bank.services.canonicalize import (
+    CanonicalQuestion,
+    CanonicalizationEvent,
+    QuestionVariant,
+)
 from question_bank.services.duplicate_review import DuplicateCandidateGroup, ReviewDecision
 
 
@@ -175,6 +181,276 @@ class PostgresQuestionBankRepository:
         group["decisions"] = [_dup_decision_from_row(r) for r in cursor.fetchall()]
 
         return group
+
+    # ── ADR 005: Question Canonicalization ────────────────────────────────
+
+    def save_canonical_question(self, cq: CanonicalQuestion) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_CANONICAL_QUESTION,
+            {
+                "id": cq.id,
+                "canonical_fingerprint": cq.canonical_fingerprint,
+                "representative_item_id": cq.representative_item_id,
+                "stem_latex": cq.stem_latex,
+                "answer_latex": cq.answer_latex,
+                "analysis_latex": cq.analysis_latex,
+                "question_type": cq.question_type,
+                "difficulty": cq.difficulty,
+                "status": cq.status,
+                "created_from_group_id": cq.created_from_group_id,
+            },
+        )
+
+    def save_question_variant(self, v: QuestionVariant) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_QUESTION_VARIANT,
+            {
+                "id": v.id,
+                "canonical_question_id": v.canonical_question_id,
+                "question_id": v.question_id,
+                "paper_id": v.paper_id,
+                "variant_type": v.variant_type,
+                "source_position_key": v.source_position_key,
+                "text_fingerprint": v.text_fingerprint,
+                "latex_fingerprint": v.latex_fingerprint,
+                "asset_signature": v.asset_signature,
+                "is_active": v.is_active,
+            },
+        )
+
+    def save_canonicalization_event(self, e: CanonicalizationEvent) -> None:
+        cursor = self.connection.cursor()
+        cursor.execute(
+            _INSERT_CANONICALIZATION_EVENT,
+            {
+                "id": e.id,
+                "canonical_question_id": e.canonical_question_id,
+                "group_id": e.group_id,
+                "event_type": e.event_type,
+                "payload_json": e.payload_json,
+                "created_by": e.created_by,
+            },
+        )
+
+    def canonicalize_group(self, group_id: str, created_by: str) -> dict:
+        from question_bank.services.canonicalize import (
+            build_canonical_id,
+            canonicalize_group as do_canonicalize,
+        )
+
+        group = self.get_duplicate_group(group_id)
+        if group is None:
+            raise ValueError(f"Group not found: {group_id}")
+
+        canonical_id = build_canonical_id(group_id)
+        cursor = self.connection.cursor()
+
+        # Idempotency: check if canonical already exists for this group
+        cursor.execute(_SELECT_CANONICAL_BY_GROUP_ID, {"group_id": group_id})
+        existing = cursor.fetchone()
+
+        if existing is not None:
+            existing_dict = _canonical_from_row(existing)
+            if existing_dict["status"] == "active":
+                # Already active — return existing canonical
+                result = {
+                    "canonical": existing_dict,
+                    "variants": [],
+                    "event": None,
+                }
+                cursor.execute(
+                    _SELECT_VARIANTS_BY_CANONICAL,
+                    {"canonical_id": existing_dict["id"]},
+                )
+                result["variants"] = [
+                    _variant_from_row(r) for r in cursor.fetchall()
+                ]
+                return result
+            # Reverted — reactivate
+            try:
+                cursor.execute(
+                    _UPDATE_CANONICAL_STATUS,
+                    {"id": existing_dict["id"], "status": "active"},
+                )
+                cursor.execute(
+                    _UPDATE_VARIANTS_ACTIVATE,
+                    {"canonical_id": existing_dict["id"]},
+                )
+                import json as _json
+                reactivate_event = CanonicalizationEvent(
+                    id=_canonical_event_id(existing_dict["id"], "reactivated"),
+                    canonical_question_id=existing_dict["id"],
+                    group_id=group_id,
+                    event_type="reactivated",
+                    payload_json=_json.dumps({"reactivated_by": created_by}, ensure_ascii=False),
+                    created_by=created_by,
+                )
+                cursor.execute(
+                    _INSERT_CANONICALIZATION_EVENT,
+                    {
+                        "id": reactivate_event.id,
+                        "canonical_question_id": reactivate_event.canonical_question_id,
+                        "group_id": reactivate_event.group_id,
+                        "event_type": reactivate_event.event_type,
+                        "payload_json": reactivate_event.payload_json,
+                        "created_by": reactivate_event.created_by,
+                    },
+                )
+                cursor.execute(
+                    _SELECT_VARIANTS_BY_CANONICAL,
+                    {"canonical_id": existing_dict["id"]},
+                )
+                variants = [_variant_from_row(r) for r in cursor.fetchall()]
+                self.connection.commit()
+                return {
+                    "canonical": {**existing_dict, "status": "active"},
+                    "variants": variants,
+                    "event": {
+                        "id": reactivate_event.id,
+                        "canonical_question_id": reactivate_event.canonical_question_id,
+                        "group_id": reactivate_event.group_id,
+                        "event_type": reactivate_event.event_type,
+                        "payload_json": reactivate_event.payload_json,
+                        "created_by": reactivate_event.created_by,
+                    },
+                }
+            except Exception:
+                self.connection.rollback()
+                raise
+
+        # Create new canonical
+        try:
+            result = do_canonicalize(group, created_by)
+            cq = result["canonical"]
+            variants = result["variants"]
+            event = result["event"]
+
+            self.save_canonical_question(cq)
+            for v in variants:
+                self.save_question_variant(v)
+            self.save_canonicalization_event(event)
+
+            cursor.execute(
+                _UPDATE_GROUP_STATUS,
+                {"id": group_id, "status": "resolved"},
+            )
+            self.connection.commit()
+
+            return {
+                "canonical": _canonical_to_dict(cq),
+                "variants": [_variant_to_dict(v) for v in variants],
+                "event": _event_to_dict(event),
+            }
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def list_canonical_questions(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        cursor = self.connection.cursor()
+        if status:
+            cursor.execute(
+                _SELECT_CANONICAL_QUESTIONS_BY_STATUS,
+                {"status": status, "limit": limit},
+            )
+        else:
+            cursor.execute(_SELECT_CANONICAL_QUESTIONS, {"limit": limit})
+        return [_canonical_from_row(row) for row in cursor.fetchall()]
+
+    def get_canonical_question(self, canonical_id: str) -> dict | None:
+        cursor = self.connection.cursor()
+        cursor.execute(_SELECT_CANONICAL_QUESTION_BY_ID, {"id": canonical_id})
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        canonical = _canonical_from_row(row)
+
+        cursor.execute(
+            _SELECT_VARIANTS_BY_CANONICAL,
+            {"canonical_id": canonical_id},
+        )
+        canonical["variants"] = [
+            _variant_from_row(r) for r in cursor.fetchall()
+        ]
+        return canonical
+
+    def rollback_canonical(self, canonical_id: str, created_by: str) -> None:
+        cursor = self.connection.cursor()
+        try:
+            cursor.execute(
+                _UPDATE_CANONICAL_STATUS,
+                {"id": canonical_id, "status": "reverted"},
+            )
+            cursor.execute(
+                _UPDATE_VARIANTS_DEACTIVATE,
+                {"canonical_id": canonical_id},
+            )
+            import json as _json
+            payload = _json.dumps({"rolled_back_by": created_by}, ensure_ascii=False)
+            cursor.execute(
+                _INSERT_CANONICALIZATION_EVENT,
+                {
+                    "id": _canonical_event_id(canonical_id, "reverted"),
+                    "canonical_question_id": canonical_id,
+                    "group_id": "",
+                    "event_type": "reverted",
+                    "payload_json": payload,
+                    "created_by": created_by,
+                },
+            )
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+
+def _canonical_to_dict(cq: CanonicalQuestion) -> dict:
+    return {
+        "id": cq.id,
+        "canonical_fingerprint": cq.canonical_fingerprint,
+        "representative_item_id": cq.representative_item_id,
+        "stem_latex": cq.stem_latex,
+        "answer_latex": cq.answer_latex,
+        "analysis_latex": cq.analysis_latex,
+        "question_type": cq.question_type,
+        "difficulty": cq.difficulty,
+        "status": cq.status,
+        "created_from_group_id": cq.created_from_group_id,
+    }
+
+
+def _variant_to_dict(v: QuestionVariant) -> dict:
+    return {
+        "id": v.id,
+        "canonical_question_id": v.canonical_question_id,
+        "question_id": v.question_id,
+        "paper_id": v.paper_id,
+        "variant_type": v.variant_type,
+        "source_position_key": v.source_position_key,
+        "text_fingerprint": v.text_fingerprint,
+        "latex_fingerprint": v.latex_fingerprint,
+        "asset_signature": v.asset_signature,
+        "is_active": v.is_active,
+    }
+
+
+def _event_to_dict(e: CanonicalizationEvent) -> dict:
+    return {
+        "id": e.id,
+        "canonical_question_id": e.canonical_question_id,
+        "group_id": e.group_id,
+        "event_type": e.event_type,
+        "payload_json": e.payload_json,
+        "created_by": e.created_by,
+    }
+
+
+def _canonical_event_id(canonical_id: str, event_type: str) -> str:
+    ts = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
+    return f"{canonical_id}_evt_{event_type}_{ts}"
 
 
 _INSERT_QUESTION_BLOCK = """
@@ -452,6 +728,133 @@ ORDER BY created_at DESC
 """
 
 
+# ---------------------------------------------------------------------------
+# ADR 005: Question Canonicalization SQL
+# ---------------------------------------------------------------------------
+
+_INSERT_CANONICAL_QUESTION = """
+INSERT INTO canonical_questions (
+  id, canonical_fingerprint, representative_item_id,
+  stem_latex, answer_latex, analysis_latex,
+  question_type, difficulty, status, created_from_group_id
+) VALUES (
+  %(id)s, %(canonical_fingerprint)s, %(representative_item_id)s,
+  %(stem_latex)s, %(answer_latex)s, %(analysis_latex)s,
+  %(question_type)s, %(difficulty)s, %(status)s, %(created_from_group_id)s
+) ON CONFLICT (id) DO UPDATE SET
+  canonical_fingerprint = EXCLUDED.canonical_fingerprint,
+  representative_item_id = EXCLUDED.representative_item_id,
+  stem_latex = EXCLUDED.stem_latex,
+  answer_latex = EXCLUDED.answer_latex,
+  analysis_latex = EXCLUDED.analysis_latex,
+  question_type = EXCLUDED.question_type,
+  difficulty = EXCLUDED.difficulty,
+  status = EXCLUDED.status,
+  updated_at = now()
+"""
+
+_INSERT_QUESTION_VARIANT = """
+INSERT INTO question_variants (
+  id, canonical_question_id, question_id, paper_id, variant_type,
+  source_position_key, text_fingerprint, latex_fingerprint,
+  asset_signature, is_active
+) VALUES (
+  %(id)s, %(canonical_question_id)s, %(question_id)s, %(paper_id)s,
+  %(variant_type)s, %(source_position_key)s, %(text_fingerprint)s,
+  %(latex_fingerprint)s, %(asset_signature)s, %(is_active)s
+) ON CONFLICT (id) DO UPDATE SET
+  question_id = EXCLUDED.question_id,
+  is_active = EXCLUDED.is_active
+"""
+
+_INSERT_CANONICALIZATION_EVENT = """
+INSERT INTO canonicalization_events (
+  id, canonical_question_id, group_id, event_type,
+  payload_json, created_by
+) VALUES (
+  %(id)s, %(canonical_question_id)s, %(group_id)s,
+  %(event_type)s, %(payload_json)s, %(created_by)s
+) ON CONFLICT DO NOTHING
+"""
+
+_UPDATE_CANONICAL_STATUS = """
+UPDATE canonical_questions
+SET status = %(status)s, updated_at = now()
+WHERE id = %(id)s
+"""
+
+_UPDATE_VARIANTS_DEACTIVATE = """
+UPDATE question_variants
+SET is_active = false
+WHERE canonical_question_id = %(canonical_id)s
+"""
+
+_UPDATE_VARIANTS_ACTIVATE = """
+UPDATE question_variants
+SET is_active = true
+WHERE canonical_question_id = %(canonical_id)s
+"""
+
+_UPDATE_GROUP_STATUS = """
+UPDATE duplicate_candidate_groups
+SET status = %(status)s
+WHERE id = %(id)s
+"""
+
+_SELECT_CANONICAL_QUESTIONS = """
+SELECT
+  id, canonical_fingerprint, representative_item_id,
+  stem_latex, answer_latex, analysis_latex,
+  question_type, difficulty, status, created_from_group_id,
+  created_at, updated_at
+FROM canonical_questions
+ORDER BY created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_CANONICAL_QUESTIONS_BY_STATUS = """
+SELECT
+  id, canonical_fingerprint, representative_item_id,
+  stem_latex, answer_latex, analysis_latex,
+  question_type, difficulty, status, created_from_group_id,
+  created_at, updated_at
+FROM canonical_questions
+WHERE status = %(status)s
+ORDER BY created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_CANONICAL_QUESTION_BY_ID = """
+SELECT
+  id, canonical_fingerprint, representative_item_id,
+  stem_latex, answer_latex, analysis_latex,
+  question_type, difficulty, status, created_from_group_id,
+  created_at, updated_at
+FROM canonical_questions
+WHERE id = %(id)s
+"""
+
+_SELECT_CANONICAL_BY_GROUP_ID = """
+SELECT
+  id, canonical_fingerprint, representative_item_id,
+  stem_latex, answer_latex, analysis_latex,
+  question_type, difficulty, status, created_from_group_id,
+  created_at, updated_at
+FROM canonical_questions
+WHERE created_from_group_id = %(group_id)s
+"""
+
+_SELECT_VARIANTS_BY_CANONICAL = """
+SELECT
+  id, canonical_question_id, question_id, paper_id, variant_type,
+  source_position_key, text_fingerprint, latex_fingerprint,
+  asset_signature, is_active, created_at
+FROM question_variants
+WHERE canonical_question_id = %(canonical_id)s
+ORDER BY paper_id
+"""
+
+
 def _dup_group_from_row(row: Any) -> dict:
     if isinstance(row, dict):
         return {
@@ -506,4 +909,80 @@ def _dup_decision_from_row(row: Any) -> dict:
         "id": id_, "group_id": gid, "decision": decision,
         "canonical_question_id": cqid, "reviewer": reviewer,
         "reason": reason, "created_at": str(created_at),
+    }
+
+
+def _canonical_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"],
+            "canonical_fingerprint": row["canonical_fingerprint"],
+            "representative_item_id": row["representative_item_id"],
+            "stem_latex": row["stem_latex"],
+            "answer_latex": row["answer_latex"],
+            "analysis_latex": row["analysis_latex"],
+            "question_type": row["question_type"],
+            "difficulty": row["difficulty"],
+            "status": row["status"],
+            "created_from_group_id": row["created_from_group_id"],
+            "created_at": str(row.get("created_at", "")),
+            "updated_at": str(row.get("updated_at", "")),
+        }
+    (
+        id_, cfp, rep_id, stem, answer, analysis,
+        qtype, diff, status, group_id, created_at, updated_at,
+    ) = row
+    return {
+        "id": id_, "canonical_fingerprint": cfp,
+        "representative_item_id": rep_id,
+        "stem_latex": stem, "answer_latex": answer, "analysis_latex": analysis,
+        "question_type": qtype, "difficulty": diff, "status": status,
+        "created_from_group_id": group_id,
+        "created_at": str(created_at), "updated_at": str(updated_at),
+    }
+
+
+def _variant_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"],
+            "canonical_question_id": row["canonical_question_id"],
+            "question_id": row.get("question_id"),
+            "paper_id": row["paper_id"],
+            "variant_type": row["variant_type"],
+            "source_position_key": row["source_position_key"],
+            "text_fingerprint": row["text_fingerprint"],
+            "latex_fingerprint": row["latex_fingerprint"],
+            "asset_signature": row["asset_signature"],
+            "is_active": row["is_active"],
+            "created_at": str(row.get("created_at", "")),
+        }
+    (
+        id_, cqid, qid, pid, vtype, spk, tf, lf, af, active, created_at,
+    ) = row
+    return {
+        "id": id_, "canonical_question_id": cqid, "question_id": qid,
+        "paper_id": pid, "variant_type": vtype,
+        "source_position_key": spk, "text_fingerprint": tf,
+        "latex_fingerprint": lf, "asset_signature": af,
+        "is_active": active, "created_at": str(created_at),
+    }
+
+
+def _event_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"],
+            "canonical_question_id": row["canonical_question_id"],
+            "group_id": row["group_id"],
+            "event_type": row["event_type"],
+            "payload_json": row.get("payload_json", "{}"),
+            "created_by": row.get("created_by", ""),
+            "created_at": str(row.get("created_at", "")),
+        }
+    id_, cqid, gid, etype, payload, created_by, created_at = row
+    return {
+        "id": id_, "canonical_question_id": cqid, "group_id": gid,
+        "event_type": etype, "payload_json": payload,
+        "created_by": created_by, "created_at": str(created_at),
     }
