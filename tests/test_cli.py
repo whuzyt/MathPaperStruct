@@ -92,6 +92,7 @@ class CLITest(unittest.TestCase):
         all_sql = fake_psycopg.connection.cursor_obj.all_sql
         self.assertIn("CREATE TABLE IF NOT EXISTS papers", all_sql)
         self.assertIn("CREATE TABLE IF NOT EXISTS duplicate_candidate_groups", all_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS canonical_questions", all_sql)
         self.assertTrue(fake_psycopg.connection.committed)
 
     def test_review_list_prints_review_queue_items(self):
@@ -161,6 +162,9 @@ class FakeCursor:
 
     def fetchall(self):
         return self.rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
 
 
     def test_env_enable_layout_ownership_runs_shadow_without_cli_flag(self):
