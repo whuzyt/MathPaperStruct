@@ -308,6 +308,7 @@ class FakeCursor:
         return self.rows[0] if self.rows else None
 
 
+class ShadowCLITest(unittest.TestCase):
     def test_env_enable_layout_ownership_runs_shadow_without_cli_flag(self):
         """ENABLE_LAYOUT_OWNERSHIP=true enables shadow even without --enable-layout-ownership."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -348,7 +349,6 @@ class FakeCursor:
         """Shadow old-splitter baseline comes from the raw file, not pipeline blocks."""
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
-            # Original markdown has a section header, answer section, and 3 questions
             original_content = (
                 "一、选择题\n"
                 "1. 选题一\n"
@@ -400,13 +400,152 @@ class FakeCursor:
 
         self.assertEqual(exit_code, 0)
         output = stdout.getvalue()
-        # The old splitter, when run on the original markdown, splits
-        # document sections first — body only has 2 questions (1, 2)
-        # before the answer section. So old_question_count should be 2.
         self.assertIn("Layout Ownership Shadow Comparison", output)
         self.assertIn("old splitter question_count : 2", output)
-        # Pipeline result (printed in summary) should also have 2 questions
         self.assertIn("questions=2", output)
+
+
+class PaperIngestFullCLITest(unittest.TestCase):
+    def test_paper_ingest_full_parses_args_and_calls_orchestrator(self):
+        """paper ingest-full parses args and delegates to the orchestrator."""
+        from question_bank.services.paper_orchestrator import (
+            IngestionReport,
+            StepResult,
+        )
+
+        fake_report = IngestionReport(
+            paper_id="paper_001",
+            status="completed",
+            started_at="2026-05-17T00:00:00Z",
+            finished_at="2026-05-17T00:05:00Z",
+            steps=[
+                StepResult(name="mineru_parse", status="success",
+                           started_at="...", finished_at="...",
+                           input_count=1, output_count=1),
+                StepResult(name="deepseek_structure", status="success",
+                           started_at="...", finished_at="...",
+                           input_count=1, output_count=5),
+                StepResult(name="crop_assets", status="success",
+                           started_at="...", finished_at="...",
+                           input_count=3, output_count=3),
+            ],
+            counts={
+                "mineru_parse": 1, "deepseek_structure": 5, "crop_assets": 3,
+                "steps_total": 10, "steps_succeeded": 10,
+                "steps_failed": 0, "steps_skipped": 0,
+            },
+            warnings=[],
+            errors=[],
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch(
+            "question_bank.services.paper_orchestrator.ingest_paper_full",
+            return_value=fake_report,
+        ):
+            exit_code = main(
+                [
+                    "paper", "ingest-full",
+                    "--paper-id", "paper_001",
+                    "--pdf", "/tmp/test.pdf",
+                    "--work-dir", "/tmp/runs/paper_001",
+                    "--asset-dir", "/tmp/assets",
+                    "--dry-run",
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(exit_code, 0)
+        output = stdout.getvalue()
+        self.assertIn("Paper: paper_001", output)
+        self.assertIn("Status: completed", output)
+        self.assertIn("mineru_parse", output)
+        self.assertIn("OK", output)
+
+    def test_paper_ingest_full_dry_run_no_db_connect(self):
+        """paper ingest-full --dry-run does not attempt database connection."""
+        from question_bank.services.paper_orchestrator import (
+            IngestionReport,
+            StepResult,
+        )
+
+        fake_report = IngestionReport(
+            paper_id="paper_001",
+            status="completed",
+            started_at="...", finished_at="...",
+            steps=[
+                StepResult(name="mineru_parse", status="success",
+                           started_at="...", finished_at="..."),
+            ],
+            counts={"steps_total": 1, "steps_succeeded": 1,
+                    "steps_failed": 0, "steps_skipped": 0},
+            warnings=[], errors=[],
+        )
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with patch(
+            "question_bank.services.paper_orchestrator.ingest_paper_full",
+            return_value=fake_report,
+        ) as mock_ingest:
+            exit_code = main(
+                [
+                    "paper", "ingest-full",
+                    "--paper-id", "paper_001",
+                    "--pdf", "/tmp/test.pdf",
+                    "--work-dir", "/tmp/runs/paper_001",
+                    "--dry-run",
+                ],
+                stdout=stdout,
+                stderr=stderr,
+            )
+
+        self.assertEqual(exit_code, 0)
+        call_kwargs = mock_ingest.call_args.kwargs
+        self.assertTrue(call_kwargs.get("dry_run"))
+        self.assertIsNone(call_kwargs.get("repository"))
+
+    def test_paper_ingest_full_resume_flag_passed_to_orchestrator(self):
+        """--resume flag is forwarded to the orchestrator."""
+        from question_bank.services.paper_orchestrator import (
+            IngestionReport,
+            StepResult,
+        )
+
+        fake_report = IngestionReport(
+            paper_id="paper_001",
+            status="completed",
+            started_at="...", finished_at="...",
+            steps=[],
+            counts={"steps_total": 0, "steps_succeeded": 0,
+                    "steps_failed": 0, "steps_skipped": 0},
+            warnings=[], errors=[],
+        )
+
+        stdout = io.StringIO()
+
+        with patch(
+            "question_bank.services.paper_orchestrator.ingest_paper_full",
+            return_value=fake_report,
+        ) as mock_ingest:
+            main(
+                [
+                    "paper", "ingest-full",
+                    "--paper-id", "paper_001",
+                    "--pdf", "/tmp/test.pdf",
+                    "--work-dir", "/tmp/runs/paper_001",
+                    "--resume",
+                    "--dry-run",
+                ],
+                stdout=stdout,
+            )
+
+        call_kwargs = mock_ingest.call_args.kwargs
+        self.assertTrue(call_kwargs.get("resume"))
 
 
 if __name__ == "__main__":
