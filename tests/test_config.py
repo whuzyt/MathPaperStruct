@@ -44,6 +44,16 @@ class SettingsTest(unittest.TestCase):
 
         self.assertEqual(settings.deepseek_api_key, "sk-process")
 
+    def test_enable_layout_ownership_defaults_to_false(self):
+        settings = Settings.from_env({})
+        self.assertFalse(settings.enable_layout_ownership)
+
+    def test_enable_layout_ownership_true(self):
+        for value in ("true", "TRUE", "1", "yes", "on"):
+            with self.subTest(value=value):
+                settings = Settings.from_env({"ENABLE_LAYOUT_OWNERSHIP": value})
+                self.assertTrue(settings.enable_layout_ownership)
+
 
 if __name__ == "__main__":
     unittest.main()

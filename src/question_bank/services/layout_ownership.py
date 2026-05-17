@@ -12,14 +12,28 @@ from typing import Any
 SECTION_PATTERN = re.compile(
     r"^[一二三四五六七八九十]+[、.．]\s*(选择|填空|解答|计算|证明|应用|综合|压轴).*$"
 )
+# Non-standard section markers: "向量小题A", "考点一", "专题二", "第3章" etc.
+ALT_SECTION_PATTERN = re.compile(
+    r"^(?:向量\s*)?小题[A-Z]$|"
+    r"^(?:考点|专题|模块)[一二三四五六七八九十0-9]+|"
+    r"^第[0-9一二三四五六七八九十]+[章节]"
+)
+# Nonstandard subsection markers: trigger section_hierarchy_suspected when
+# a question number repeats >= 3 times across changing section titles that
+# match this pattern.
+NONSTANDARD_SUBSECTION_PATTERN = re.compile(
+    r"(?:小题|专题|模块|题组|类型|考点|向量小题|"
+    r"第[一二三四五六七八九十]+组|"
+    r"[A-H][组类])"
+)
 ANSWER_SECTION_PATTERN = re.compile(
     r"^(参考答案|答案|解析|答案与解析|试卷答案|详解)\s*$"
 )
 QUESTION_ARABIC_PATTERN = re.compile(
-    r"^\s*(?:第\s*)?([0-9]{1,3})(?:\s*题)?[\.．、)]\s*"
+    r"^\s*(?:第\s*)?([0-9]{1,3})(?:\s*题)?\s*[\.．、)：：]\s*"
 )
 QUESTION_CHINESE_PATTERN = re.compile(
-    r"^\s*[（(]?([一二三四五六七八九十]{1,4})[）)、.．]\s*"
+    r"^\s*[（(]?\s*([一二三四五六七八九十]{1,4})\s*[）)、.．：：]\s*"
 )
 OPTION_LABEL_PATTERN = re.compile(r"^\s*[A-H][\.．、:：]\s+")
 VISUAL_CUE_PATTERN = re.compile(
@@ -60,6 +74,7 @@ class LayoutOwnershipBlock:
     element_ids: list[str]
     assets: list[AssetAssignment]
     warnings: list[str]
+    section_path: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +102,7 @@ class _Element:
     is_question_anchor: bool = False
     question_number: str = ""
     section_title: str = ""
+    section_path: tuple[str, ...] = ()
     reading_order: int = -1
     is_option_label: bool = False
 
@@ -291,8 +307,14 @@ def assign_reading_order(elements: list[_Element]) -> list[_Element]:
 # ---------------------------------------------------------------------------
 
 def detect_sections(elements: list[_Element]) -> list[str]:
-    """Mark section and answer-section elements. Returns warnings."""
+    """Mark section and answer-section elements. Build hierarchical section_path.
+
+    ADR 002: replaces flat section_title propagation with nested section_path.
+    Section elements get section_path set directly; non-section elements inherit
+    the path later in build_question_blocks() via reading-order propagation.
+    """
     warnings: list[str] = []
+    current_path: list[str] = []
 
     for elem in elements:
         if elem.is_noise or elem.is_header_footer:
@@ -303,11 +325,29 @@ def detect_sections(elements: list[_Element]) -> list[str]:
 
         if ANSWER_SECTION_PATTERN.match(text):
             elem.is_answer_section = True
+            current_path = ["参考答案"]
+            continue
+
+        if ALT_SECTION_PATTERN.match(text):
+            elem.is_section = True
+            elem.section_title = text
+            current_path = [text]
+            elem.section_path = tuple(current_path)
             continue
 
         if SECTION_PATTERN.match(text):
             elem.is_section = True
             elem.section_title = text
+            if current_path and NONSTANDARD_SUBSECTION_PATTERN.search(current_path[-1]):
+                current_path = [current_path[0], text]
+            else:
+                current_path = [text]
+            elem.section_path = tuple(current_path)
+            continue
+
+        # Non-section elements get a snapshot of the current section title
+        # for backward compat; section_path is resolved in build_question_blocks.
+        elem.section_title = current_path[-1] if current_path else ""
 
     return warnings
 
@@ -382,6 +422,10 @@ def detect_question_anchors(
             if elem.bbox[0] > col["x1"] + 0.12:
                 continue
 
+        # Reject decimal numbers (e.g. "0.005", "3.14") that match the pattern
+        if text[match.end():match.end() + 1].isdigit():
+            continue
+
         # text after marker check
         remainder = text[match.end():].strip()
         if remainder:
@@ -428,31 +472,31 @@ def build_question_blocks(
             answer_start_order = elem.reading_order
             break
 
-    # Section tracking: current section title in effect
-    # Build section start orders
-    section_starts: list[tuple[int, str]] = []  # (reading_order, section_title)
+    # Section tracking: section_starts records (reading_order, section_title, section_path)
+    section_starts: list[tuple[int, str, tuple[str, ...]]] = []
     for elem in sorted_elements:
         if elem.is_section and elem.section_title:
-            section_starts.append((elem.reading_order, elem.section_title))
+            sp = elem.section_path if elem.section_path else (elem.section_title,)
+            section_starts.append((elem.reading_order, elem.section_title, sp))
 
     if not anchors:
         return blocks, warnings
 
-    seen_numbers: dict[tuple[str, str], int] = {}  # (section_title, question_number) -> count
+    seen_numbers: dict[tuple[tuple[str, ...], str], int] = {}  # (section_path, q_number) -> count
 
     for i, anchor in enumerate(anchors):
         q_number = anchor.question_number
 
-        # Find current section
-        current_section = _current_section_for(anchor.reading_order, section_starts)
+        # Find current section (title + path) from reading-order propagation
+        current_section, current_path = _current_section_for(anchor.reading_order, section_starts)
 
-        # Track duplicate question numbers per section
-        scope_key = (current_section, q_number)
+        # Dedup key: (section_path, question_number) per ADR 002
+        scope_key = (current_path, q_number)
         if scope_key in seen_numbers:
             seen_numbers[scope_key] += 1
             warnings.append(
                 f"duplicate_question_number: {q_number} appears at anchor {anchor.id} "
-                f"in section {current_section!r}"
+                f"in section_path {current_path}"
             )
         else:
             seen_numbers[scope_key] = 1
@@ -567,6 +611,7 @@ def build_question_blocks(
             question_block_id=block_id,
             question_number=q_number,
             section_title=current_section,
+            section_path=current_path,
             pages=sorted(set(pages_covered)),
             column_index=effective_column if effective_column >= 0 else 0,
             text_bbox=text_bbox,
@@ -805,12 +850,14 @@ def _detect_orphan_and_cross_column(
             continue
 
         if elem.type == "text":
-            # Check if this unowned text element overlaps any block's y-range
-            # on the same page → cross_column_question
+            # Check if this unowned text element overlaps a block's y-range
+            # on the same page but has a different column_index → cross_column_question
             for block in blocks:
                 if elem.page not in block.pages:
                     continue
                 if not block.text_bbox:
+                    continue
+                if elem.column_index == block.column_index:
                     continue
                 text_y1, text_y2 = block.text_bbox[1], block.text_bbox[3]
                 elem_y1, elem_y2 = elem.bbox[1], elem.bbox[3]
@@ -818,11 +865,71 @@ def _detect_orphan_and_cross_column(
                 if y_overlap > 0:
                     warnings.append(
                         f"cross_column_question: {elem.id} on page {elem.page} "
-                        f"overlaps question {block.question_number} y-range but is in different column"
+                        f"overlaps question {block.question_number} y-range but is in column {elem.column_index} "
+                        f"(question column {block.column_index})"
                     )
                     break
 
     return warnings
+
+
+def _detect_section_hierarchy_issues(
+    blocks: list[LayoutOwnershipBlock],
+    elements: list[_Element],
+) -> list[str]:
+    """Detect nonstandard section nesting by analyzing question number collisions.
+
+    ADR 002: after nesting resolution, the warning fires only when the SAME
+    question_number still collides under the SAME section_path (i.e. nesting
+    did not resolve the collision). Different section_paths with the same
+    number are expected behavior in nested-section papers.
+    """
+    from collections import defaultdict
+
+    # First, check if this paper has nonstandard section markers at all.
+    has_nonstandard = any(
+        e.is_section
+        and not SECTION_PATTERN.match(e.text.strip())
+        and NONSTANDARD_SUBSECTION_PATTERN.search(e.text.strip())
+        for e in elements
+    )
+    if not has_nonstandard:
+        return []
+
+    # Group blocks by question_number
+    by_number: dict[str, list[LayoutOwnershipBlock]] = defaultdict(list)
+    for b in blocks:
+        by_number[b.question_number].append(b)
+
+    # Find numbers appearing >= 3 times where section_path does NOT explain
+    # the collision (i.e. same path appears for multiple blocks of same number).
+    suspected_numbers: list[str] = []
+    for qn, qn_blocks in by_number.items():
+        if len(qn_blocks) < 3:
+            continue
+        paths = {b.section_path for b in qn_blocks}
+        if len(paths) != len(qn_blocks):
+            # Some blocks share the same section_path → hierarchy didn't resolve
+            suspected_numbers.append(qn)
+
+    if not suspected_numbers:
+        return []
+
+    # Build a structured warning
+    suspected_numbers.sort(key=lambda n: (int(n) if n.isdigit() else 0, n))
+    affected_paths: set[str] = set()
+    for qn in suspected_numbers:
+        for b in by_number[qn]:
+            affected_paths.add(str(b.section_path))
+
+    summary = (
+        f"section_hierarchy_suspected: "
+        f"{len(suspected_numbers)} question numbers appear >= 3 times "
+        f"across {len(affected_paths)} unresolved section paths "
+        f"(numbers: {', '.join(suspected_numbers[:10])}"
+        f"{'...' if len(suspected_numbers) > 10 else ''})"
+    )
+    return [summary]
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +983,11 @@ def layout_ownership(
     # 8b: orphan formula + cross-column text drift detection
     orphan_warnings = _detect_orphan_and_cross_column(blocks, elements, sorted_elements)
     all_warnings.extend(orphan_warnings)
+
+    # 8c: section hierarchy analysis — detect nested subsections that cause
+    # question number collisions across nonstandard section boundaries
+    hierarchy_warnings = _detect_section_hierarchy_issues(blocks, elements)
+    all_warnings.extend(hierarchy_warnings)
 
     # Step 9: Asset scoring and assignment
     asset_warnings = assign_assets(blocks, elements, elements_by_id, page_columns)
@@ -963,15 +1075,18 @@ def _next_in_reading_order(
 
 def _current_section_for(
     reading_order: int,
-    section_starts: list[tuple[int, str]],
-) -> str:
-    current = ""
-    for order, title in section_starts:
+    section_starts: list[tuple[int, str, tuple[str, ...]]],
+) -> tuple[str, tuple[str, ...]]:
+    """Return (section_title, section_path) for the given reading_order."""
+    current_title = ""
+    current_path: tuple[str, ...] = ()
+    for order, title, sp in section_starts:
         if order < reading_order:
-            current = title
+            current_title = title
+            current_path = sp
         else:
             break
-    return current
+    return current_title, current_path
 
 
 def _build_block_id(paper_id: str, anchors: list[_Element], index: int) -> str:

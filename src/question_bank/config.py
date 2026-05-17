@@ -26,6 +26,7 @@ class Settings:
     minio_endpoint: str = DEFAULT_MINIO_ENDPOINT
     minio_access_key: str = DEFAULT_MINIO_ACCESS_KEY
     minio_secret_key: str = DEFAULT_MINIO_SECRET_KEY
+    enable_layout_ownership: bool = False
 
     @classmethod
     def load(cls) -> "Settings":
@@ -43,6 +44,7 @@ class Settings:
             minio_endpoint=env.get("MINIO_ENDPOINT", DEFAULT_MINIO_ENDPOINT).rstrip("/"),
             minio_access_key=env.get("MINIO_ACCESS_KEY", DEFAULT_MINIO_ACCESS_KEY),
             minio_secret_key=env.get("MINIO_SECRET_KEY", DEFAULT_MINIO_SECRET_KEY),
+            enable_layout_ownership=_parse_bool(env.get("ENABLE_LAYOUT_OWNERSHIP", "false")),
         )
 
 
@@ -50,3 +52,7 @@ def _blank_to_none(value: str | None) -> str | None:
     if value is None or not value.strip():
         return None
     return value
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in ("1", "true", "yes", "on")

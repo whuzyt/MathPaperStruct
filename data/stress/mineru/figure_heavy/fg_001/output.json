@@ -1,0 +1,93 @@
+[
+  {
+    "id": "s1",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.08,
+      0.06,
+      0.5,
+      0.09
+    ],
+    "text": "三、解答题",
+    "confidence": 0.98
+  },
+  {
+    "id": "q1",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.08,
+      0.12,
+      0.72,
+      0.15
+    ],
+    "text": "1. 如图，在矩形 $ABCD$ 中，求阴影面积。",
+    "confidence": 0.98
+  },
+  {
+    "id": "img1",
+    "page": 1,
+    "type": "image",
+    "bbox": [
+      0.16,
+      0.18,
+      0.58,
+      0.43
+    ],
+    "text": "",
+    "confidence": 0.98
+  },
+  {
+    "id": "q2",
+    "page": 1,
+    "type": "text",
+    "bbox": [
+      0.08,
+      0.5,
+      0.72,
+      0.53
+    ],
+    "text": "2. 图中函数 $y=f(x)$ 的零点个数为多少？",
+    "confidence": 0.98
+  },
+  {
+    "id": "img2",
+    "page": 1,
+    "type": "image",
+    "bbox": [
+      0.18,
+      0.56,
+      0.7,
+      0.82
+    ],
+    "text": "",
+    "confidence": 0.98
+  },
+  {
+    "id": "q3",
+    "page": 2,
+    "type": "text",
+    "bbox": [
+      0.08,
+      0.08,
+      0.72,
+      0.11
+    ],
+    "text": "3. 如下表，求平均数。",
+    "confidence": 0.98
+  },
+  {
+    "id": "tab1",
+    "page": 2,
+    "type": "image",
+    "bbox": [
+      0.14,
+      0.16,
+      0.72,
+      0.35
+    ],
+    "text": "",
+    "confidence": 0.98
+  }
+]
