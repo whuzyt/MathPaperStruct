@@ -53,6 +53,10 @@ def main(
             return _run_asset_list(args, stdout, stderr)
         if args.asset_command == "crop":
             return _run_asset_crop(args, stdout, stderr)
+        if args.asset_command == "phash":
+            return _run_asset_phash(args, stdout, stderr)
+        if args.asset_command == "visual-candidates":
+            return _run_asset_visual_candidates(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -149,6 +153,14 @@ def _build_parser() -> argparse.ArgumentParser:
                             help="Path to source PDF.")
     asset_crop.add_argument("--output-dir", type=Path, default=Path("data/assets"),
                             help="Root directory for cropped assets.")
+
+    asset_phash = asset_sub.add_parser("phash", help="Compute perceptual hashes.")
+    asset_phash.add_argument("--paper-id", required=True)
+
+    asset_vc = asset_sub.add_parser("visual-candidates",
+                                    help="List visual duplicate candidates.")
+    asset_vc.add_argument("--max-distance", type=int, default=8)
+    asset_vc.add_argument("--limit", type=int, default=100)
 
     return parser
 
@@ -660,6 +672,96 @@ def _run_asset_crop(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
         file=stdout,
     )
     return 0 if failed == 0 else 1
+
+
+def _run_asset_phash(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    from question_bank.services.image_phash import compute_phash
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    raw_assets = repository.list_raw_assets(paper_id=args.paper_id, limit=10000)
+    print(f"Computing pHash for {len(raw_assets)} assets…", file=stdout)
+
+    ok = 0
+    skip = 0
+    fail = 0
+
+    try:
+        for ra in raw_assets:
+            crop_path = ra.get("crop_path")
+            if not crop_path:
+                skip += 1
+                continue
+
+            try:
+                phash = compute_phash(crop_path)
+            except Exception as exc:
+                fail += 1
+                print(f"  FAIL {ra['id']}: {exc}", file=stderr)
+                continue
+
+            repository.update_raw_asset_phash(ra["id"], phash)
+            ok += 1
+            print(f"  OK {ra['id']} phash={phash}", file=stdout)
+
+        repository.connection.commit()
+    except Exception:
+        repository.connection.rollback()
+        raise
+
+    print(
+        f"\nDone: {ok} hashed, {skip} skipped (no crop), {fail} failed",
+        file=stdout,
+    )
+    return 0 if fail == 0 else 1
+
+
+def _run_asset_visual_candidates(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    from question_bank.services.asset_visual_dedup import generate_visual_asset_candidates
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    raw_assets = repository.list_raw_assets(limit=args.limit)
+    candidates = generate_visual_asset_candidates(
+        raw_assets, max_distance=args.max_distance
+    )
+
+    if not candidates:
+        print("No visual candidate groups found.", file=stdout)
+        return 0
+
+    header = f"{'group_id':<22} {'type':<8} {'size':>5} {'avg_d':>6} {'min_d':>6} {'max_d':>6}"
+    print(header, file=stdout)
+    print("-" * 60, file=stdout)
+    for g in candidates:
+        print(
+            f"{g.group_id:<22} {g.asset_type:<8} {len(g.members):>5} "
+            f"{g.avg_distance:>6.1f} {g.min_distance:>6} {g.max_distance:>6}",
+            file=stdout,
+        )
+        for m in g.members:
+            print(
+                f"    {m['id']}  paper={m.get('paper_id', '')}  "
+                f"phash={m.get('perceptual_hash', '')}",
+                file=stdout,
+            )
+
+    print(f"\n{len(candidates)} visual candidate group(s) found.", file=stdout)
+    return 0
 
 
 def _schema_paths() -> list[Path]:
