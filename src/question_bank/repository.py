@@ -6,6 +6,7 @@ from typing import Any, Protocol
 
 from question_bank.domain.models import QualityIssue, Question, QuestionAsset, QuestionBlock
 from question_bank.pipeline import ProcessingResult
+from question_bank.services.duplicate_review import DuplicateCandidateGroup, ReviewDecision
 
 
 class CursorProtocol(Protocol):
@@ -85,6 +86,95 @@ class PostgresQuestionBankRepository:
         cursor = self.connection.cursor()
         cursor.execute(_SELECT_REVIEW_QUEUE, {"limit": limit})
         return [_review_item_from_row(row) for row in cursor.fetchall()]
+
+    # ── ADR 004: Duplicate Review Queue ──────────────────────────────────
+
+    def save_duplicate_candidate_group(self, group: DuplicateCandidateGroup) -> None:
+        cursor = self.connection.cursor()
+        try:
+            max_sim = max(
+                (s.composite for s in group.pairwise_similarities.values()), default=0.0
+            )
+            cursor.execute(
+                _INSERT_DUPLICATE_GROUP,
+                {
+                    "id": group.id,
+                    "fingerprint": group.fingerprint,
+                    "fingerprint_type": group.fingerprint_type,
+                    "candidate_count": len(group.items),
+                    "max_similarity": max_sim,
+                    "status": group.status,
+                },
+            )
+
+            cursor.execute(_DELETE_GROUP_ITEMS, {"group_id": group.id})
+
+            for item in group.items:
+                item_id = f"{group.id}_item_{item.block_id}"
+                cursor.execute(
+                    _INSERT_DUPLICATE_ITEM,
+                    {
+                        "id": item_id,
+                        "group_id": group.id,
+                        "block_id": item.block_id,
+                        "question_id": item.question_id,
+                        "paper_id": item.paper_id,
+                        "section_path": item.section_path,
+                        "question_number": item.question_number,
+                        "source_position_key": item.source_position_key,
+                        "text_fingerprint": item.text_fingerprint,
+                        "latex_fingerprint": item.latex_fingerprint,
+                        "asset_signature": item.asset_signature,
+                    },
+                )
+
+            self.connection.commit()
+        except Exception:
+            self.connection.rollback()
+            raise
+
+    def save_review_decision(self, decision: ReviewDecision) -> None:
+        cursor = self.connection.cursor()
+        decision_id = f"drd_{decision.group_id}_{decision.reviewer}_{decision.decision}"
+        cursor.execute(
+            _INSERT_REVIEW_DECISION,
+            {
+                "id": decision_id,
+                "group_id": decision.group_id,
+                "decision": decision.decision,
+                "canonical_question_id": decision.canonical_question_id,
+                "reviewer": decision.reviewer,
+                "reason": decision.reason,
+            },
+        )
+        self.connection.commit()
+
+    def list_duplicate_groups(
+        self, status: str | None = None, limit: int = 50
+    ) -> list[dict]:
+        cursor = self.connection.cursor()
+        if status:
+            cursor.execute(_SELECT_DUPLICATE_GROUPS_BY_STATUS, {"status": status, "limit": limit})
+        else:
+            cursor.execute(_SELECT_DUPLICATE_GROUPS, {"limit": limit})
+        rows = cursor.fetchall()
+        return [_dup_group_from_row(row) for row in rows]
+
+    def get_duplicate_group(self, group_id: str) -> dict | None:
+        cursor = self.connection.cursor()
+        cursor.execute(_SELECT_DUPLICATE_GROUP_BY_ID, {"group_id": group_id})
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        group = _dup_group_from_row(row)
+
+        cursor.execute(_SELECT_DUPLICATE_ITEMS_BY_GROUP, {"group_id": group_id})
+        group["items"] = [_dup_item_from_row(r) for r in cursor.fetchall()]
+
+        cursor.execute(_SELECT_DUPLICATE_DECISIONS_BY_GROUP, {"group_id": group_id})
+        group["decisions"] = [_dup_decision_from_row(r) for r in cursor.fetchall()]
+
+        return group
 
 
 _INSERT_QUESTION_BLOCK = """
@@ -268,3 +358,152 @@ def _json_loads(value: Any, default: Any) -> Any:
     if isinstance(value, str):
         return json.loads(value)
     return value
+
+
+# ---------------------------------------------------------------------------
+# ADR 004: Duplicate Review Queue SQL
+# ---------------------------------------------------------------------------
+
+_INSERT_DUPLICATE_GROUP = """
+INSERT INTO duplicate_candidate_groups (
+  id, fingerprint, fingerprint_type, candidate_count, max_similarity, status
+) VALUES (
+  %(id)s, %(fingerprint)s, %(fingerprint_type)s,
+  %(candidate_count)s, %(max_similarity)s, %(status)s
+) ON CONFLICT (id) DO UPDATE SET
+  candidate_count = EXCLUDED.candidate_count,
+  max_similarity = EXCLUDED.max_similarity,
+  status = EXCLUDED.status
+"""
+
+_INSERT_DUPLICATE_ITEM = """
+INSERT INTO duplicate_candidate_items (
+  id, group_id, block_id, question_id, paper_id, section_path,
+  question_number, source_position_key, text_fingerprint,
+  latex_fingerprint, asset_signature
+) VALUES (
+  %(id)s, %(group_id)s, %(block_id)s, %(question_id)s, %(paper_id)s,
+  %(section_path)s, %(question_number)s, %(source_position_key)s,
+  %(text_fingerprint)s, %(latex_fingerprint)s, %(asset_signature)s
+) ON CONFLICT (id) DO UPDATE SET
+  question_id = EXCLUDED.question_id,
+  section_path = EXCLUDED.section_path
+"""
+
+_DELETE_GROUP_ITEMS = """
+DELETE FROM duplicate_candidate_items WHERE group_id = %(group_id)s
+"""
+
+_INSERT_REVIEW_DECISION = """
+INSERT INTO duplicate_review_decisions (
+  id, group_id, decision, canonical_question_id, reviewer, reason
+) VALUES (
+  %(id)s, %(group_id)s, %(decision)s, %(canonical_question_id)s,
+  %(reviewer)s, %(reason)s
+) ON CONFLICT DO NOTHING
+"""
+
+_SELECT_DUPLICATE_GROUPS = """
+SELECT
+  dcg.id, dcg.fingerprint, dcg.fingerprint_type,
+  dcg.candidate_count, dcg.max_similarity, dcg.status,
+  dcg.created_at
+FROM duplicate_candidate_groups dcg
+ORDER BY dcg.candidate_count DESC, dcg.created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_DUPLICATE_GROUPS_BY_STATUS = """
+SELECT
+  dcg.id, dcg.fingerprint, dcg.fingerprint_type,
+  dcg.candidate_count, dcg.max_similarity, dcg.status,
+  dcg.created_at
+FROM duplicate_candidate_groups dcg
+WHERE dcg.status = %(status)s
+ORDER BY dcg.candidate_count DESC, dcg.created_at DESC
+LIMIT %(limit)s
+"""
+
+_SELECT_DUPLICATE_GROUP_BY_ID = """
+SELECT
+  dcg.id, dcg.fingerprint, dcg.fingerprint_type,
+  dcg.candidate_count, dcg.max_similarity, dcg.status,
+  dcg.created_at
+FROM duplicate_candidate_groups dcg
+WHERE dcg.id = %(group_id)s
+"""
+
+_SELECT_DUPLICATE_ITEMS_BY_GROUP = """
+SELECT
+  id, group_id, block_id, question_id, paper_id, section_path,
+  question_number, source_position_key, text_fingerprint,
+  latex_fingerprint, asset_signature
+FROM duplicate_candidate_items
+WHERE group_id = %(group_id)s
+ORDER BY paper_id, question_number
+"""
+
+_SELECT_DUPLICATE_DECISIONS_BY_GROUP = """
+SELECT
+  id, group_id, decision, canonical_question_id, reviewer, reason, created_at
+FROM duplicate_review_decisions
+WHERE group_id = %(group_id)s
+ORDER BY created_at DESC
+"""
+
+
+def _dup_group_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"],
+            "fingerprint": row["fingerprint"],
+            "fingerprint_type": row["fingerprint_type"],
+            "candidate_count": row["candidate_count"],
+            "max_similarity": row["max_similarity"],
+            "status": row["status"],
+            "created_at": str(row.get("created_at", "")),
+        }
+    id_, fp, fp_type, count, max_sim, status, created_at = row
+    return {
+        "id": id_, "fingerprint": fp, "fingerprint_type": fp_type,
+        "candidate_count": count, "max_similarity": max_sim,
+        "status": status, "created_at": str(created_at),
+    }
+
+
+def _dup_item_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "group_id": row["group_id"],
+            "block_id": row["block_id"], "question_id": row.get("question_id"),
+            "paper_id": row["paper_id"], "section_path": row["section_path"],
+            "question_number": row["question_number"],
+            "source_position_key": row["source_position_key"],
+            "text_fingerprint": row["text_fingerprint"],
+            "latex_fingerprint": row["latex_fingerprint"],
+            "asset_signature": row["asset_signature"],
+        }
+    id_, gid, bid, qid, pid, sp, qn, spk, tf, lf, af = row
+    return {
+        "id": id_, "group_id": gid, "block_id": bid, "question_id": qid,
+        "paper_id": pid, "section_path": sp, "question_number": qn,
+        "source_position_key": spk, "text_fingerprint": tf,
+        "latex_fingerprint": lf, "asset_signature": af,
+    }
+
+
+def _dup_decision_from_row(row: Any) -> dict:
+    if isinstance(row, dict):
+        return {
+            "id": row["id"], "group_id": row["group_id"],
+            "decision": row["decision"],
+            "canonical_question_id": row.get("canonical_question_id"),
+            "reviewer": row["reviewer"], "reason": row.get("reason", ""),
+            "created_at": str(row.get("created_at", "")),
+        }
+    id_, gid, decision, cqid, reviewer, reason, created_at = row
+    return {
+        "id": id_, "group_id": gid, "decision": decision,
+        "canonical_question_id": cqid, "reviewer": reviewer,
+        "reason": reason, "created_at": str(created_at),
+    }

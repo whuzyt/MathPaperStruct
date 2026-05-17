@@ -32,6 +32,13 @@ def main(
         return _run_db_init(stdout, stderr)
     if args.command == "review" and args.review_command == "list":
         return _run_review_list(args, stdout, stderr)
+    if args.command == "review" and args.review_command == "duplicate":
+        if args.duplicate_command == "generate":
+            return _run_duplicate_generate(args, stdout, stderr)
+        if args.duplicate_command == "list":
+            return _run_duplicate_list(args, stdout, stderr)
+        if args.duplicate_command == "decide":
+            return _run_duplicate_decide(args, stdout, stderr)
 
     parser.print_help(stdout)
     return 0
@@ -63,6 +70,34 @@ def _build_parser() -> argparse.ArgumentParser:
     review_subparsers = review.add_subparsers(dest="review_command")
     review_list = review_subparsers.add_parser("list", help="List questions that need review.")
     review_list.add_argument("--limit", type=int, default=50)
+
+    # review duplicate
+    duplicate = review_subparsers.add_parser("duplicate", help="Duplicate candidate review.")
+    dup_subparsers = duplicate.add_subparsers(dest="duplicate_command")
+
+    dup_generate = dup_subparsers.add_parser(
+        "generate", help="Generate duplicate candidate groups from fingerprint collisions."
+    )
+    dup_generate.add_argument("--paper-dir", type=Path, required=True)
+    dup_generate.add_argument("--fp-type", default="text", choices=["text", "latex", "asset"])
+    dup_generate.add_argument("--min-candidates", type=int, default=2)
+    dup_generate.add_argument("--max-items", type=int, default=20)
+    dup_generate.add_argument("--save-db", action="store_true")
+    dup_generate.add_argument("--out", type=Path)
+
+    dup_list = dup_subparsers.add_parser("list", help="List duplicate candidate groups.")
+    dup_list.add_argument("--status", default=None)
+    dup_list.add_argument("--group-id")
+    dup_list.add_argument("--limit", type=int, default=50)
+
+    dup_decide = dup_subparsers.add_parser("decide", help="Record a review decision.")
+    dup_decide.add_argument("--group-id", required=True)
+    dup_decide.add_argument("--decision", required=True,
+                            choices=["same", "variant", "unrelated", "unsure"])
+    dup_decide.add_argument("--canonical-question-id", default=None)
+    dup_decide.add_argument("--reviewer", default="")
+    dup_decide.add_argument("--reason", default="")
+
     return parser
 
 
@@ -207,18 +242,19 @@ def _run_db_init(stdout: TextIO, stderr: TextIO) -> int:
         return 2
 
     settings = Settings.load()
-    schema_sql = _schema_path().read_text(encoding="utf-8")
     connection = psycopg.connect(settings.database_url)
     cursor = connection.cursor()
     try:
-        cursor.execute(schema_sql)
+        for schema_path in _schema_paths():
+            schema_sql = schema_path.read_text(encoding="utf-8")
+            cursor.execute(schema_sql)
         connection.commit()
     except Exception as exc:
         connection.rollback()
         print(f"schema initialization failed: {exc}", file=stderr)
         return 2
 
-    print("schema initialized", file=stdout)
+    print(f"schema initialized ({len(_schema_paths())} files)", file=stdout)
     return 0
 
 
@@ -246,8 +282,94 @@ def _run_review_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
     return 0
 
 
-def _schema_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "db" / "001_initial_schema.sql"
+def _run_duplicate_generate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    if not args.paper_dir.exists():
+        print(f"Directory not found: {args.paper_dir}", file=stderr)
+        return 2
+
+    from question_bank.services.duplicate_review import (
+        DuplicateCandidateGroup,
+        format_groups_summary,
+        generate_candidate_groups,
+        groups_to_json,
+    )
+    from tools.batch_duplicate_review import run_batch
+
+    groups = run_batch(
+        args.paper_dir,
+        fingerprint_type=args.fp_type,
+        min_candidates=args.min_candidates,
+        max_items_per_group=args.max_items,
+        save_to_db=args.save_db,
+    )
+
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(groups_to_json(groups) + "\n", encoding="utf-8")
+        print(f"JSON written to {args.out}", file=stdout)
+
+    print(format_groups_summary(groups), file=stdout)
+    return 0
+
+
+def _run_duplicate_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    if args.group_id:
+        group = repository.get_duplicate_group(args.group_id)
+        if group is None:
+            print(f"Group not found: {args.group_id}", file=stderr)
+            return 2
+        import json as _json
+        print(_json.dumps(group, ensure_ascii=False, indent=2), file=stdout)
+        return 0
+
+    groups = repository.list_duplicate_groups(status=args.status, limit=args.limit)
+    for g in groups:
+        print(
+            f"{g['id']}\t{g['fingerprint_type']}\t"
+            f"count={g['candidate_count']}\t"
+            f"max_sim={g['max_similarity']:.3f}\t"
+            f"status={g['status']}",
+            file=stdout,
+        )
+    return 0
+
+
+def _run_duplicate_decide(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -> int:
+    try:
+        import psycopg
+    except ImportError:
+        print("psycopg is required. Install project dependencies.", file=stderr)
+        return 2
+
+    from question_bank.services.duplicate_review import ReviewDecision
+
+    settings = Settings.load()
+    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+
+    decision = ReviewDecision(
+        group_id=args.group_id,
+        decision=args.decision,
+        canonical_question_id=args.canonical_question_id,
+        reviewer=args.reviewer,
+        reason=args.reason,
+    )
+    repository.save_review_decision(decision)
+    print(f"Decision recorded: group={args.group_id} decision={args.decision}", file=stdout)
+    return 0
+
+
+def _schema_paths() -> list[Path]:
+    db_dir = Path(__file__).resolve().parents[2] / "db"
+    return sorted(db_dir.glob("*.sql"))
 
 
 def _read_markdown(markdown_path: Path) -> str:
