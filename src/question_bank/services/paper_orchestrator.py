@@ -11,6 +11,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from question_bank.domain.models import Choice, QualityReport, Question, QuestionAsset, QuestionBlock
 from question_bank.pipeline import ProcessingResult
@@ -336,6 +337,143 @@ def _finalize(
     return report
 
 
+def _discover_mineru_json_files(work_path: Path) -> list[Path]:
+    content_list = sorted(work_path.rglob("*_content_list.json"))
+    if content_list:
+        return content_list
+
+    middle = sorted(work_path.rglob("*_middle.json"))
+    if middle:
+        return middle
+
+    return sorted(work_path.rglob("*.json"))
+
+
+def _load_layout_elements(json_path: Path) -> list[dict[str, Any]]:
+    raw = json.loads(json_path.read_text(encoding="utf-8"))
+
+    if _looks_like_layout_elements(raw):
+        return raw
+
+    if _looks_like_mineru_content_list(raw):
+        return _mineru_content_list_to_layout_elements(raw)
+
+    if _looks_like_mineru_content_list_v2(raw):
+        flattened: list[dict[str, Any]] = []
+        for page_idx, page_items in enumerate(raw):
+            for item in page_items:
+                if isinstance(item, dict):
+                    copied = dict(item)
+                    copied.setdefault("page_idx", page_idx)
+                    flattened.append(copied)
+        return _mineru_content_list_to_layout_elements(flattened)
+
+    raise ValueError(
+        f"Unsupported MinerU JSON shape for layout ownership: {json_path.name}"
+    )
+
+
+def _looks_like_layout_elements(raw: Any) -> bool:
+    if not isinstance(raw, list):
+        return False
+    if not raw:
+        return True
+    sample = [item for item in raw[:5] if isinstance(item, dict)]
+    return bool(sample) and all(
+        "page" in item and "type" in item and "bbox" in item for item in sample
+    )
+
+
+def _looks_like_mineru_content_list(raw: Any) -> bool:
+    if not isinstance(raw, list):
+        return False
+    if not raw:
+        return True
+    sample = [item for item in raw[:5] if isinstance(item, dict)]
+    return bool(sample) and all("page_idx" in item and "bbox" in item for item in sample)
+
+
+def _looks_like_mineru_content_list_v2(raw: Any) -> bool:
+    return isinstance(raw, list) and bool(raw) and all(
+        isinstance(page_items, list) for page_items in raw[:5]
+    )
+
+
+def _mineru_content_list_to_layout_elements(
+    raw_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    elements: list[dict[str, Any]] = []
+
+    for idx, item in enumerate(raw_items, start=1):
+        bbox = _normalize_mineru_bbox(item.get("bbox"))
+        if bbox is None:
+            continue
+
+        page_idx = item.get("page_idx", 0)
+        if not isinstance(page_idx, int) or page_idx < 0:
+            page_idx = 0
+
+        mineru_type = str(item.get("type", "text") or "text")
+        element_type = _map_mineru_element_type(mineru_type)
+        text = _mineru_item_text(item, mineru_type)
+
+        elements.append({
+            "id": f"m{idx:06d}",
+            "page": page_idx + 1,
+            "type": element_type,
+            "bbox": bbox,
+            "text": text,
+            "confidence": float(item.get("confidence", 1.0) or 1.0),
+        })
+
+    return elements
+
+
+def _normalize_mineru_bbox(raw_bbox: Any) -> list[float] | None:
+    if not isinstance(raw_bbox, list | tuple) or len(raw_bbox) != 4:
+        return None
+
+    coords = [float(v) for v in raw_bbox]
+    scale = 1000.0 if max(coords) > 1.0 else 1.0
+    x1, y1, x2, y2 = [min(1.0, max(0.0, v / scale)) for v in coords]
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return [x1, y1, x2, y2]
+
+
+def _map_mineru_element_type(mineru_type: str) -> str:
+    mapping = {
+        "text": "text",
+        "list": "text",
+        "header": "header",
+        "footer": "footer",
+        "page_number": "footer",
+        "equation": "formula",
+        "interline_equation": "formula",
+        "inline_equation": "formula",
+        "image": "image",
+        "table": "table",
+        "chart": "figure",
+    }
+    return mapping.get(mineru_type, "text")
+
+
+def _mineru_item_text(item: dict[str, Any], mineru_type: str) -> str:
+    if mineru_type == "list":
+        list_items = item.get("list_items")
+        if isinstance(list_items, list):
+            return "\n".join(str(x) for x in list_items)
+
+    for key in ("text", "content", "table_body", "table_caption", "img_caption"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, list):
+            return "\n".join(str(x) for x in value if str(x).strip())
+
+    return ""
+
+
 # ---------------------------------------------------------------------------
 # Step 1: MinerU parse
 # ---------------------------------------------------------------------------
@@ -357,10 +495,7 @@ def _step_mineru_parse(
     # so check by globbing rather than hardcoding flat paths.
     if resume:
         md_files = list(work_path.rglob("*.md"))
-        json_files = (
-            list(work_path.rglob("*_middle.json"))
-            or list(work_path.rglob("*.json"))
-        )
+        json_files = _discover_mineru_json_files(work_path)
         if md_files and json_files:
             ctx["mineru_result"] = MinerUResult(
                 output_dir=work_path,
@@ -391,7 +526,7 @@ def _step_layout_ownership(
     if min_result is None or min_result.raw_json_path is None:
         raise FileNotFoundError("MinerU elements JSON not found — mineru_parse must run first")
 
-    raw_elements = json.loads(min_result.raw_json_path.read_text(encoding="utf-8"))
+    raw_elements = _load_layout_elements(min_result.raw_json_path)
     blocks = layout_ownership(paper_id, raw_elements)
 
     # Build elements_by_id for downstream steps

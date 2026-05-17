@@ -51,6 +51,9 @@ class LocalMinerURunnerTest(unittest.TestCase):
             parse_dir = out_dir / "test_paper" / "auto"
             parse_dir.mkdir(parents=True)
             (parse_dir / "test_paper.md").write_text("# Test Markdown")
+            (parse_dir / "test_paper_content_list.json").write_text(
+                json.dumps([{"type": "text", "text": "hello", "bbox": [0, 0, 1, 1], "page_idx": 0}])
+            )
             (parse_dir / "test_paper_middle.json").write_text(
                 json.dumps([{"id": "e1", "type": "text", "text": "hello"}])
             )
@@ -61,8 +64,29 @@ class LocalMinerURunnerTest(unittest.TestCase):
                 result = runner.parse_pdf(pdf_path, out_dir)
 
             self.assertEqual(result.markdown_path, parse_dir / "test_paper.md")
-            self.assertEqual(result.raw_json_path, parse_dir / "test_paper_middle.json")
+            self.assertEqual(result.raw_json_path, parse_dir / "test_paper_content_list.json")
             self.assertEqual(result.assets_dir, parse_dir / "images")
+
+    def test_parse_pdf_falls_back_to_middle_json_when_no_content_list(self):
+        """_middle.json remains a compatibility fallback when content_list is absent."""
+        runner = LocalMinerURunner(command="mineru")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_dir = Path(tmpdir) / "out"
+            pdf_path = Path(tmpdir) / "test_paper.pdf"
+            pdf_path.write_text("fake pdf content")
+
+            parse_dir = out_dir / "test_paper" / "auto"
+            parse_dir.mkdir(parents=True)
+            (parse_dir / "test_paper.md").write_text("# Test Markdown")
+            (parse_dir / "test_paper_middle.json").write_text(
+                json.dumps([{"id": "e1", "type": "text", "text": "hello"}])
+            )
+
+            with mock.patch("subprocess.run"):
+                result = runner.parse_pdf(pdf_path, out_dir)
+
+            self.assertEqual(result.raw_json_path, parse_dir / "test_paper_middle.json")
 
     def test_parse_pdf_falls_back_to_any_json_when_no_middle_json(self):
         """Old MinerU or non-pipeline backends may not produce _middle.json."""

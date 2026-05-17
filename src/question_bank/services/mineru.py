@@ -49,7 +49,12 @@ class LocalMinerURunner:
         # The method directory varies by backend (auto, txt, ocr, hybrid_auto, etc.)
         # Discover artifacts by globbing rather than hardcoding paths.
         md_candidates = sorted(output_dir.rglob(f"{pdf_stem}.md"))
-        json_candidates = sorted(output_dir.rglob(f"{pdf_stem}_middle.json"))
+        # Prefer content_list: it is the flat element stream closest to our
+        # layout ownership contract. _middle.json is a nested MinerU internals
+        # dict in 3.x and is kept only as a compatibility fallback.
+        json_candidates = sorted(output_dir.rglob(f"{pdf_stem}_content_list.json"))
+        if not json_candidates:
+            json_candidates = sorted(output_dir.rglob(f"{pdf_stem}_middle.json"))
         # Fall back: old MinerU versions or alternative filenames
         if not json_candidates:
             json_candidates = sorted(output_dir.rglob("*.json"))

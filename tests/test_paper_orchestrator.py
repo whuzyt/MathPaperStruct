@@ -157,6 +157,32 @@ class TestPaperOrchestrator(unittest.TestCase):
              "confidence": 0.98},
         ]), encoding="utf-8")
 
+    def _make_mineru_content_list_output(self):
+        """Create MinerU 3.x content_list artifacts."""
+        parse_dir = self.work_dir / "paper_001" / "hybrid_auto"
+        parse_dir.mkdir(parents=True, exist_ok=True)
+        (parse_dir / "paper_001.md").write_text("1. 已知 $x=1$，求 $x+1$。\n", encoding="utf-8")
+        (parse_dir / "paper_001_content_list.json").write_text(json.dumps([
+            {
+                "type": "text",
+                "text": "1. 已知 $x=1$，求 $x+1$。",
+                "bbox": [80, 120, 820, 160],
+                "page_idx": 0,
+            },
+            {
+                "type": "equation",
+                "text": "$$x+1=2$$",
+                "bbox": [100, 165, 500, 205],
+                "page_idx": 0,
+            },
+            {
+                "type": "page_number",
+                "text": "1",
+                "bbox": [490, 960, 510, 980],
+                "page_idx": 0,
+            },
+        ]), encoding="utf-8")
+
     def test_happy_path_all_steps_succeed(self):
         """Full pipeline with all steps succeeding."""
         self._make_mineru_output()
@@ -201,6 +227,30 @@ class TestPaperOrchestrator(unittest.TestCase):
         # Verify report was written
         report_path = self.work_dir / "run-report.json"
         self.assertTrue(report_path.exists())
+
+    def test_mineru_content_list_is_normalized_for_layout_ownership(self):
+        """Real MinerU 3.x content_list JSON is converted before layout ownership."""
+        self._make_mineru_content_list_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                resume=True,
+                repository=repo,
+                deepseek_client=FakeDeepSeekClient(),
+            )
+
+        mock_mineru.return_value.parse_pdf.assert_not_called()
+        self.assertEqual(report.status, "completed")
+        layout_step = next(s for s in report.steps if s.name == "layout_ownership")
+        self.assertEqual(layout_step.output_count, 1)
+        self.assertEqual(len(repo.saved_results), 1)
 
     def test_mineru_resume_skips_when_output_exists(self):
         """When output.md and output.json both exist and resume=True, MinerU is skipped."""
