@@ -89,7 +89,9 @@ class CLITest(unittest.TestCase):
 
         self.assertEqual(exit_code, 0)
         self.assertIn("schema initialized", stdout.getvalue())
-        self.assertIn("CREATE TABLE IF NOT EXISTS papers", fake_psycopg.connection.cursor_obj.sql)
+        all_sql = fake_psycopg.connection.cursor_obj.all_sql
+        self.assertIn("CREATE TABLE IF NOT EXISTS papers", all_sql)
+        self.assertIn("CREATE TABLE IF NOT EXISTS duplicate_candidate_groups", all_sql)
         self.assertTrue(fake_psycopg.connection.committed)
 
     def test_review_list_prints_review_queue_items(self):
@@ -143,13 +145,19 @@ class FakeConnection:
 
 class FakeCursor:
     def __init__(self, rows=None):
+        self._all_sql: list[str] = []
         self.sql = ""
         self.params = None
         self.rows = rows or []
 
     def execute(self, sql, params=None):
+        self._all_sql.append(sql)
         self.sql = sql
         self.params = params
+
+    @property
+    def all_sql(self) -> str:
+        return "\n".join(self._all_sql)
 
     def fetchall(self):
         return self.rows
