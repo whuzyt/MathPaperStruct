@@ -1052,7 +1052,7 @@ class TestQualityGatingIntegration(unittest.TestCase):
         self._make_two_question_output()
         repo = FakeRepository()
 
-        # Second question has unbalanced latex + no analysis
+        # Second question has unbalanced latex + answer not in choices
         class FakeDeepSeekWithMultipleWarnings:
             def __init__(self):
                 self._called = 0
@@ -1061,11 +1061,12 @@ class TestQualityGatingIntegration(unittest.TestCase):
                 self._called += 1
                 if self._called == 2:
                     return {
-                        "question_type": "proof",
-                        "stem_latex": "prove $x",
-                        "choices": [],
-                        "answer_latex": "answer",
-                        "analysis_latex": "",
+                        "question_type": "single_choice",
+                        "stem_latex": "choose $x",
+                        "choices": [{"label": "A", "content_latex": "x=1"},
+                                    {"label": "B", "content_latex": "x=2"}],
+                        "answer_latex": "C",
+                        "analysis_latex": "ok",
                         "knowledge_points": [],
                         "difficulty": None,
                         "warnings": [],
@@ -1099,11 +1100,11 @@ class TestQualityGatingIntegration(unittest.TestCase):
                 deepseek_client=FakeDeepSeekWithMultipleWarnings(),
             )
 
-        # Second question should have both warnings
+        # Second question should have both warnings (unbalanced_latex + answer_not_in_choices)
         self.assertEqual(report.questions_passed, 1)
         self.assertEqual(report.questions_warning, 1)
         self.assertIn("unbalanced_latex_delimiters", report.quality_warning_counts)
-        self.assertIn("missing_analysis", report.quality_warning_counts)
+        self.assertIn("answer_not_in_choices", report.quality_warning_counts)
 
     def test_run_report_json_includes_quality_fields(self):
         """ADR 013: run-report.json includes quality gating fields."""

@@ -24,6 +24,7 @@ from question_bank.services.local_asset_store import store_crop_result
 from question_bank.services.mineru import LocalMinerURunner, MinerUResult
 from question_bank.services.pdf_cropper import crop_pdf_assets
 from question_bank.services.quality import (
+    IMAGE_REFERENCE_PATTERN,
     GatingResult,
     gate_question,
     validate_question,
@@ -591,6 +592,78 @@ def _step_layout_ownership(
 
 
 # ---------------------------------------------------------------------------
+# ADR 015: DeepSeek output hardening
+# ---------------------------------------------------------------------------
+
+
+def _harden_question(
+    question: Question,
+    qb: QuestionBlock,
+    payload: dict,
+) -> None:
+    """ADR 015: post-process DeepSeek output to reduce quality gating warnings.
+
+    This runs AFTER type inference but BEFORE validation/gating.
+    Mutates the question in place; appends model warnings to payload.
+    """
+    from question_bank.domain.models import QuestionType
+
+    qt = str(question.question_type)
+
+    # 1. Pad single_choice choices from raw_markdown if < 2
+    if qt == QuestionType.SINGLE_CHOICE and len(question.choices) < 2:
+        parsed = parse_choices(qb.raw_markdown)
+        if parsed:
+            existing_labels = {c.label.strip().upper() for c in question.choices}
+            for c in parsed:
+                if c.label.strip().upper() not in existing_labels:
+                    question.choices.append(c)
+                    existing_labels.add(c.label.strip().upper())
+
+    # 2. Normalize answer to choice label for single_choice
+    if qt == QuestionType.SINGLE_CHOICE and question.choices:
+        choice_labels = {c.label.strip().upper() for c in question.choices}
+        answer = question.answer_latex.strip()
+        answer_upper = answer.upper()
+        if answer and answer_upper not in choice_labels:
+            matched = False
+            for c in question.choices:
+                content_upper = c.content_latex.strip().upper()
+                if content_upper and (
+                    answer_upper in content_upper or content_upper in answer_upper
+                ):
+                    question.answer_latex = c.label
+                    payload.setdefault("warnings", []).append(
+                        f"answer_normalized: '{answer[:60]}' -> {c.label}"
+                    )
+                    matched = True
+                    break
+            # If still no match but answer is a single letter, try case-insensitive
+            if not matched and len(answer_upper) == 1 and answer_upper in set("ABCDEFGH"):
+                question.answer_latex = answer_upper
+                payload.setdefault("warnings", []).append(
+                    f"answer_normalized: '{answer}' -> {answer_upper}"
+                )
+        # Case-only difference: uppercase a single-letter answer that matches label
+        elif answer and len(answer) == 1 and answer != answer_upper:
+            question.answer_latex = answer_upper
+
+    # 3. Analysis fallback for proof / short_answer
+    if qt in {QuestionType.PROOF, QuestionType.SHORT_ANSWER}:
+        if not question.analysis_latex.strip():
+            question.analysis_latex = "暂无解析，待人工补充"
+            payload.setdefault("warnings", []).append(
+                "analysis_fallback: no analysis in source"
+            )
+
+    # 4. Image reference marker for blocks with assets but no text reference
+    if qb.assets:
+        combined = question.stem_latex + question.answer_latex + question.analysis_latex
+        if not IMAGE_REFERENCE_PATTERN.search(combined):
+            question.stem_latex = question.stem_latex + " [图]"
+
+
+# ---------------------------------------------------------------------------
 # Step 3: DeepSeek structure — uses layout_ownership blocks from ctx
 # ---------------------------------------------------------------------------
 
@@ -642,6 +715,9 @@ def _step_deepseek_structure(
 
         question.question_type = infer_question_type(question, qb)
         questions.append(question)
+
+        # ADR 015: harden DeepSeek output before validation/gating
+        _harden_question(question, qb, payload)
 
         report = validate_question(question)
         report.model_warnings = [

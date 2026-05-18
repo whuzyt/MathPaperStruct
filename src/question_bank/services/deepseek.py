@@ -158,7 +158,12 @@ JSON Schema:
 要求：
 - 保留数学公式 LaTeX。
 - choices 必须是数组，每个元素包含 label 和 content_latex。
-- 如果答案或解析原文不存在，返回空字符串，不要猜测。
+- 选择题 (single_choice) 的 answer_latex 必须只输出选项 label，如 "A"、"B"、"C"、"D"，
+  不得输出完整选项内容。如果原文给出了多个选项，choices 必须至少包含 2 个。
+- 解答题 (proof) 和简答题 (short_answer) 的 analysis_latex 必须包含解题过程或解析，
+  不能为空。如果原始题块没有解析内容，填入"暂无解析，待人工补充"。
+- 如果答案原文不存在，返回空字符串，不要猜测。
+- 如果解析原文不存在：选择题/填空题可返回空字符串；proof/short_answer 按上方要求填入"暂无解析，待人工补充"。
 - 如果无法确定字段，写入 warnings。
 - question_type 只能从 schema enum 中选择。
 - confidence 的每个值必须是 0 到 1 之间的数字。

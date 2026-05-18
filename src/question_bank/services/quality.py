@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from question_bank.domain.models import QualityIssue, QualityReport, Question, QuestionBlock, QuestionType
 
 
-IMAGE_REFERENCE_PATTERN = re.compile(r"(如图|下图|图中|由图|见图)")
+IMAGE_REFERENCE_PATTERN = re.compile(r"(如图|下图|图中|由图|见图|\[图\])")
 
 
 # ---------------------------------------------------------------------------
