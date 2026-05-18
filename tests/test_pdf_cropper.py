@@ -47,10 +47,6 @@ def _make_mock_page(page_width=612, page_height=792):
         b"\x01\xe2!\xbc3\x00\x00\x00\x00IEND\xaeB`\x82"
     )
 
-    pix = mock.MagicMock()
-    pix.width = 100
-    pix.height = 100
-
     crop_pix = mock.MagicMock()
     crop_pix.width = 80
     crop_pix.height = 80
@@ -59,8 +55,7 @@ def _make_mock_page(page_width=612, page_height=792):
             f.write(png_data)
     crop_pix.save = _save_png
 
-    pix.clip.return_value = crop_pix
-    p.get_pixmap.return_value = pix
+    p.get_pixmap.return_value = crop_pix
     return p, png_data
 
 

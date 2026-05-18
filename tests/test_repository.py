@@ -49,6 +49,7 @@ class RepositoryTest(unittest.TestCase):
         self.assertEqual(
             tables,
             [
+                "papers",
                 "question_blocks",
                 "questions",
                 "choices",

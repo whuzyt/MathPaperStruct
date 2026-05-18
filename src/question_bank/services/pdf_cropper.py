@@ -102,21 +102,12 @@ def crop_pdf_assets(
                     ))
                     continue
 
-                # Render page at target DPI
+                # Render only the requested page region. PyMuPDF's current API
+                # clips during rendering; Pixmap.clip() is not available in
+                # recent versions.
                 mat = fitz.Matrix(zoom, zoom)
-                pix = page.get_pixmap(matrix=mat)
-                pix_w = int(pw * zoom)
-                pix_h = int(ph * zoom)
-
-                # Convert pixel bbox to pixmap coords
-                cpx1 = max(0, min(int(px1 * zoom), pix_w))
-                cpy1 = max(0, min(int(py1 * zoom), pix_h))
-                cpx2 = max(0, min(int(px2 * zoom), pix_w))
-                cpy2 = max(0, min(int(py2 * zoom), pix_h))
-
-                # Crop the pixmap
-                crop_rect = fitz.Rect(cpx1, cpy1, cpx2, cpy2)
-                crop_pix = pix.clip(crop_rect)
+                crop_rect = fitz.Rect(px1, py1, px2, py2)
+                crop_pix = page.get_pixmap(matrix=mat, clip=crop_rect)
 
                 # Save as PNG
                 crop_path = os.path.join(output_dir, f"{ra_id}.png")

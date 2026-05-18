@@ -53,6 +53,8 @@ class PostgresQuestionBankRepository:
     def save_processing_result(self, result: ProcessingResult) -> None:
         cursor = self.connection.cursor()
         try:
+            cursor.execute(_INSERT_PAPER, _paper_params(result.paper_id))
+
             for block in result.blocks:
                 cursor.execute(_INSERT_QUESTION_BLOCK, _block_params(block))
 
@@ -683,6 +685,17 @@ def _canonical_event_id(canonical_id: str, event_type: str) -> str:
     return f"{canonical_id}_evt_{event_type}_{ts}"
 
 
+_INSERT_PAPER = """
+INSERT INTO papers (
+  id, title, subject, pdf_url, pdf_type, status
+) VALUES (
+  %(id)s, %(title)s, %(subject)s, %(pdf_url)s, %(pdf_type)s, %(status)s
+) ON CONFLICT (id) DO UPDATE SET
+  title = EXCLUDED.title,
+  status = EXCLUDED.status,
+  updated_at = now()
+"""
+
 _INSERT_QUESTION_BLOCK = """
 INSERT INTO question_blocks (
   id, paper_id, parse_run_id, question_number, section_title, raw_markdown,
@@ -774,6 +787,17 @@ WHERE qr.needs_review = true
 ORDER BY qr.overall_score ASC, q.created_at ASC
 LIMIT %(limit)s
 """
+
+
+def _paper_params(paper_id: str) -> dict[str, Any]:
+    return {
+        "id": paper_id,
+        "title": paper_id,
+        "subject": "math",
+        "pdf_url": "",
+        "pdf_type": "unknown",
+        "status": "parsed",
+    }
 
 
 def _block_params(block: QuestionBlock) -> dict[str, Any]:
