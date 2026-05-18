@@ -23,7 +23,11 @@ from question_bank.services.layout_ownership import LayoutOwnershipBlock, layout
 from question_bank.services.local_asset_store import store_crop_result
 from question_bank.services.mineru import LocalMinerURunner, MinerUResult
 from question_bank.services.pdf_cropper import crop_pdf_assets
-from question_bank.services.quality import validate_question
+from question_bank.services.quality import (
+    GatingResult,
+    gate_question,
+    validate_question,
+)
 from question_bank.services.question_identity import QuestionIdentity, fingerprint_blocks
 from question_bank.services.question_splitter import (
     parse_answer_entries,
@@ -60,6 +64,12 @@ class IngestionReport:
     counts: dict
     warnings: list[str]
     errors: list[str]
+    # ADR 013: quality gating statistics
+    questions_passed: int = 0
+    questions_warning: int = 0
+    questions_failed: int = 0
+    failed_question_ids: list[str] = field(default_factory=list)
+    quality_warning_counts: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -83,6 +93,11 @@ class IngestionReport:
             "counts": self.counts,
             "warnings": self.warnings,
             "errors": self.errors,
+            "questions_passed": self.questions_passed,
+            "questions_warning": self.questions_warning,
+            "questions_failed": self.questions_failed,
+            "failed_question_ids": self.failed_question_ids,
+            "quality_warning_counts": self.quality_warning_counts,
         }
 
     def to_json(self) -> str:
@@ -242,27 +257,27 @@ def ingest_paper_full(
     # Step 1: MinerU parse (critical) — stores MinerUResult in ctx
     run(_step_mineru_parse, paper_id, pdf_path, str(work_path), resume, mineru_command, ctx)
     if last_failed_critical():
-        return _finalize(paper_id, started_at, steps, work_path)
+        return _finalize(paper_id, started_at, steps, work_path, ctx)
 
     # Step 2: Layout ownership (critical) — uses paths from ctx + stores blocks
     run(_step_layout_ownership, paper_id, ctx)
     if last_failed_critical():
-        return _finalize(paper_id, started_at, steps, work_path)
+        return _finalize(paper_id, started_at, steps, work_path, ctx)
 
     # Step 3: DeepSeek structure (critical) — uses layout blocks from ctx
     run(_step_deepseek_structure, paper_id, deepseek_client, ctx)
     if last_failed_critical():
-        return _finalize(paper_id, started_at, steps, work_path)
+        return _finalize(paper_id, started_at, steps, work_path, ctx)
 
     # Step 4: Save questions/blocks (critical) — reads result from ctx
     run(_step_save_questions, paper_id, repository, dry_run, ctx)
     if last_failed_critical():
-        return _finalize(paper_id, started_at, steps, work_path)
+        return _finalize(paper_id, started_at, steps, work_path, ctx)
 
     # Step 5: Identify raw assets (critical) — reuses blocks from ctx
     run(_step_identify_assets, paper_id, repository, dry_run, resume, ctx)
     if last_failed_critical():
-        return _finalize(paper_id, started_at, steps, work_path)
+        return _finalize(paper_id, started_at, steps, work_path, ctx)
 
     # Step 6: Crop assets (non-critical)
     run(_step_crop_assets, paper_id, pdf_path, asset_dir, repository, dry_run)
@@ -279,7 +294,7 @@ def ingest_paper_full(
     # Step 10: Visual candidates (non-critical, cross-paper)
     run(_step_visual_candidates, repository)
 
-    return _finalize(paper_id, started_at, steps, work_path)
+    return _finalize(paper_id, started_at, steps, work_path, ctx)
 
 
 def _finalize(
@@ -287,6 +302,7 @@ def _finalize(
     started_at: str,
     steps: list[StepResult],
     work_path: Path,
+    ctx: dict | None = None,
 ) -> IngestionReport:
     warnings: list[str] = []
     errors: list[str] = []
@@ -311,6 +327,22 @@ def _finalize(
     else:
         status = "completed"
 
+    # ADR 013: compute quality gating statistics
+    gate_results: list[GatingResult] = ctx.get("gate_results", []) if ctx else []
+    questions_passed = sum(1 for gr in gate_results if gr.gate == "pass")
+    questions_warning = sum(1 for gr in gate_results if gr.gate == "warning")
+    questions_failed = sum(1 for gr in gate_results if gr.gate == "failed")
+    failed_question_ids = [gr.question_id for gr in gate_results if gr.gate == "failed"]
+    quality_warning_counts: dict[str, int] = {}
+    for gr in gate_results:
+        for wc in gr.warning_codes:
+            quality_warning_counts[wc] = quality_warning_counts.get(wc, 0) + 1
+
+    # ADR 013: if all questions failed gating, mark paper as partial
+    if gate_results and all(gr.gate == "failed" for gr in gate_results):
+        if status == "completed":
+            status = "partial"
+
     counts: dict = {}
     for s in steps:
         if s.output_count > 0:
@@ -330,6 +362,11 @@ def _finalize(
         counts=counts,
         warnings=warnings,
         errors=errors,
+        questions_passed=questions_passed,
+        questions_warning=questions_warning,
+        questions_failed=questions_failed,
+        failed_question_ids=failed_question_ids,
+        quality_warning_counts=quality_warning_counts,
     )
 
     report_path = work_path / "run-report.json"
@@ -582,6 +619,7 @@ def _step_deepseek_structure(
     question_blocks: list[QuestionBlock] = []
     questions: list[Question] = []
     reports: list[QualityReport] = []
+    gate_results: list[GatingResult] = []
 
     for index, lb in enumerate(blocks, start=1):
         # Build QuestionBlock from LayoutOwnershipBlock
@@ -613,6 +651,11 @@ def _step_deepseek_structure(
             report.needs_review = True
         reports.append(report)
 
+        # ADR 013: quality gating
+        gate_result = gate_question(question, qb)
+        gate_results.append(gate_result)
+
+    # Build full ProcessingResult (all questions, for reporting)
     result = ProcessingResult(
         paper_id=paper_id,
         blocks=question_blocks,
@@ -620,6 +663,7 @@ def _step_deepseek_structure(
         quality_reports=reports,
     )
     ctx["processing_result"] = result
+    ctx["gate_results"] = gate_results
     ctx["markdown"] = markdown
 
     return _make_result("deepseek_structure", "success", started,
@@ -662,19 +706,47 @@ def _step_save_questions(
 ) -> StepResult:
     started = _now_iso()
 
-    if dry_run:
-        result = ctx.get("processing_result")
-        q_count = len(result.questions) if result else 0
-        return _make_result("save_questions", "skipped", started, output_count=q_count)
-
     result: ProcessingResult | None = ctx.get("processing_result")
+    gate_results: list[GatingResult] = ctx.get("gate_results", [])
+
     if result is None:
+        if dry_run:
+            return _make_result("save_questions", "skipped", started, output_count=0)
         raise RuntimeError("No ProcessingResult in context — deepseek_structure must run first")
 
-    repository.save_processing_result(result)
+    # ADR 013: filter out failed questions before saving
+    failed_ids = {gr.question_id for gr in gate_results if gr.gate == "failed"}
+    if failed_ids:
+        gated_blocks = [
+            b for b, q in zip(result.blocks, result.questions)
+            if q.id not in failed_ids
+        ]
+        gated_questions = [q for q in result.questions if q.id not in failed_ids]
+        gated_reports = [r for r in result.quality_reports if r.question_id not in failed_ids]
+        save_result = ProcessingResult(
+            paper_id=result.paper_id,
+            blocks=gated_blocks,
+            questions=gated_questions,
+            quality_reports=gated_reports,
+        )
+    else:
+        save_result = result
+
+    ctx["save_result"] = save_result
+    layout_blocks: list[LayoutOwnershipBlock] = ctx.get("layout_blocks", [])
+    ctx["gated_layout_blocks"] = [
+        lb for lb, q in zip(layout_blocks, result.questions)
+        if q.id not in failed_ids
+    ] if layout_blocks else []
+
+    if dry_run:
+        return _make_result("save_questions", "skipped", started,
+                            output_count=len(save_result.questions))
+
+    repository.save_processing_result(save_result)
     return _make_result("save_questions", "success", started,
-                        input_count=len(result.blocks),
-                        output_count=len(result.questions))
+                        input_count=len(save_result.blocks),
+                        output_count=len(save_result.questions))
 
 
 # ---------------------------------------------------------------------------
@@ -704,11 +776,18 @@ def _step_identify_assets(
         except Exception:
             pass
 
-    # Reuse layout blocks from step 2 instead of recomputing
-    blocks: list[LayoutOwnershipBlock] = ctx.get("layout_blocks", [])
+    # Reuse saved/gated layout blocks from step 4 instead of recomputing.
+    # Failed-gated questions are not persisted, so downstream asset links must
+    # not point at their question_block_id values either.
+    blocks: list[LayoutOwnershipBlock] | None = ctx.get("gated_layout_blocks")
+    if blocks is None:
+        blocks = ctx.get("layout_blocks", [])
     elements_by_id: dict[str, _Element] = ctx.get("elements_by_id", {})
 
     if not blocks:
+        if "gated_layout_blocks" in ctx:
+            return _make_result("identify_assets", "success", started,
+                                input_count=0, output_count=0)
         raise RuntimeError("No layout blocks in context — layout_ownership must run first")
 
     result = repository.identify_paper_assets(paper_id, blocks, elements_by_id)
@@ -884,7 +963,9 @@ def _step_duplicate_candidates(
         identities_by_paper: dict[str, list[QuestionIdentity]] = {}
 
         # Current paper: use proper fingerprint_blocks() from ADR 003
-        layout_blocks: list[LayoutOwnershipBlock] = ctx.get("layout_blocks", [])
+        layout_blocks: list[LayoutOwnershipBlock] | None = ctx.get("gated_layout_blocks")
+        if layout_blocks is None:
+            layout_blocks = ctx.get("layout_blocks", [])
         elements_by_id: dict[str, _Element] = ctx.get("elements_by_id", {})
         if layout_blocks:
             identities_by_paper[paper_id] = fingerprint_blocks(

@@ -1,11 +1,77 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 
-from question_bank.domain.models import QualityIssue, QualityReport, Question, QuestionType
+from question_bank.domain.models import QualityIssue, QualityReport, Question, QuestionBlock, QuestionType
 
 
 IMAGE_REFERENCE_PATTERN = re.compile(r"(如图|下图|图中|由图|见图)")
+
+
+# ---------------------------------------------------------------------------
+# ADR 013: Quality gating
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class GatingResult:
+    question_id: str
+    gate: str  # "pass" | "warning" | "failed"
+    warning_codes: list[str] = field(default_factory=list)
+
+
+def gate_question(
+    question: Question,
+    block: QuestionBlock | None = None,
+) -> GatingResult:
+    """ADR 013: classify a structured question as pass/warning/failed.
+
+    Returns a GatingResult that determines whether the question should be saved.
+    Only ``failed`` questions are excluded from DB writes; ``warning`` questions
+    are saved with their warning codes recorded in the run report.
+    """
+    warning_codes: list[str] = []
+
+    # Failed: empty stem
+    if not question.stem_latex.strip():
+        return GatingResult(question.id, "failed", ["empty_stem"])
+
+    # Warning: single_choice with < 2 choices
+    if str(question.question_type) == QuestionType.SINGLE_CHOICE:
+        if len(question.choices) < 2:
+            warning_codes.append("too_few_choices")
+
+    # Warning: single_choice answer not in choice labels
+    if str(question.question_type) == QuestionType.SINGLE_CHOICE and question.choices:
+        choice_labels = {c.label.strip().upper() for c in question.choices}
+        answer = question.answer_latex.strip().upper()
+        if answer and choice_labels and answer not in choice_labels:
+            warning_codes.append("answer_not_in_choices")
+
+    # Warning: proof/short_answer with no analysis
+    if str(question.question_type) in {QuestionType.PROOF, QuestionType.SHORT_ANSWER}:
+        if not question.analysis_latex.strip():
+            warning_codes.append("missing_analysis")
+
+    # Warning: unbalanced LaTeX delimiters in any text field
+    for _field, value in [
+        ("stem_latex", question.stem_latex),
+        ("answer_latex", question.answer_latex),
+        ("analysis_latex", question.analysis_latex),
+    ]:
+        if _has_unbalanced_latex_delimiters(value):
+            warning_codes.append("unbalanced_latex_delimiters")
+            break
+
+    # Warning: block has image assets but text has no image reference
+    if block is not None and block.assets:
+        combined = question.stem_latex + question.answer_latex + question.analysis_latex
+        if not IMAGE_REFERENCE_PATTERN.search(combined):
+            warning_codes.append("asset_without_text_reference")
+
+    gate = "warning" if warning_codes else "pass"
+    return GatingResult(question.id, gate, warning_codes)
 
 
 def validate_question(question: Question) -> QualityReport:

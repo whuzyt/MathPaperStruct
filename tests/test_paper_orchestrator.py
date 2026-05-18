@@ -29,7 +29,8 @@ class FakeDeepSeekClient:
         return {
             "question_type": "single_choice",
             "stem_latex": raw_markdown,
-            "choices": [{"label": "A", "content_latex": "x=1"}],
+            "choices": [{"label": "A", "content_latex": "x=1"},
+                        {"label": "B", "content_latex": "x=2"}],
             "answer_latex": "A",
             "analysis_latex": "",
             "knowledge_points": [],
@@ -46,6 +47,7 @@ class FakeRepository:
         self._blocks: list[dict] = []
         self.saved_results: list = []
         self.saved_groups: list = []
+        self.identified_block_ids: list[str] = []
         self.crop_updates: list = []
         self.phash_updates: list = []
         self.committed = False
@@ -56,6 +58,7 @@ class FakeRepository:
         self.committed = True
 
     def identify_paper_assets(self, paper_id, blocks, elements_by_id):
+        self.identified_block_ids = [b.question_block_id for b in blocks]
         return {"raw_assets": self._raw_assets, "links": []}
 
     def list_raw_assets(self, paper_id=None, limit=100):
@@ -720,6 +723,421 @@ class TestPaperOrchestrator(unittest.TestCase):
         self.assertIsInstance(j, str)
         parsed = json.loads(j)
         self.assertEqual(parsed["paper_id"], "p1")
+
+    def test_report_to_dict_includes_quality_stats(self):
+        """ADR 013: to_dict() includes quality gating fields with defaults."""
+        report = IngestionReport(
+            paper_id="p1",
+            status="completed",
+            started_at="2026-01-01T00:00:00Z",
+            finished_at="2026-01-01T00:01:00Z",
+            steps=[],
+            counts={},
+            warnings=[],
+            errors=[],
+            questions_passed=20,
+            questions_warning=2,
+            questions_failed=0,
+            failed_question_ids=[],
+            quality_warning_counts={"too_few_choices": 2},
+        )
+        d = report.to_dict()
+        self.assertEqual(d["questions_passed"], 20)
+        self.assertEqual(d["questions_warning"], 2)
+        self.assertEqual(d["questions_failed"], 0)
+        self.assertEqual(d["failed_question_ids"], [])
+        self.assertEqual(d["quality_warning_counts"], {"too_few_choices": 2})
+
+
+# ---------------------------------------------------------------------------
+# ADR 013: Quality gating integration tests
+# ---------------------------------------------------------------------------
+
+
+class FakeDeepSeekClientWithFailures:
+    """Fake that produces one empty-stem question (failed) among normal ones."""
+
+    def __init__(self, fail_index: int = 1):
+        self.fail_index = fail_index
+        self.call_count = 0
+
+    def structure_question(self, raw_markdown: str) -> dict:
+        self.call_count += 1
+        if self.call_count == self.fail_index:
+            return {
+                "question_type": "single_choice",
+                "stem_latex": "",
+                "choices": [],
+                "answer_latex": "",
+                "analysis_latex": "",
+                "knowledge_points": [],
+                "difficulty": None,
+                "warnings": [],
+            }
+        return {
+            "question_type": "single_choice",
+            "stem_latex": raw_markdown,
+            "choices": [{"label": "A", "content_latex": "x=1"},
+                        {"label": "B", "content_latex": "x=2"}],
+            "answer_latex": "A",
+            "analysis_latex": "ok",
+            "knowledge_points": [],
+            "difficulty": None,
+            "warnings": [],
+        }
+
+
+class FakeDeepSeekClientAllFailures:
+    """Fake that produces empty-stem for all questions."""
+
+    def structure_question(self, raw_markdown: str) -> dict:
+        return {
+            "question_type": "single_choice",
+            "stem_latex": "",
+            "choices": [],
+            "answer_latex": "",
+            "analysis_latex": "",
+            "knowledge_points": [],
+            "difficulty": None,
+            "warnings": [],
+        }
+
+
+class TestQualityGatingIntegration(unittest.TestCase):
+    """ADR 013: quality gating end-to-end integration tests."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.work_dir = Path(self.tmpdir) / "runs" / "paper_001"
+        self.asset_dir = Path(self.tmpdir) / "assets"
+
+    def _make_two_question_output(self):
+        """Create MinerU output that produces 2 layout blocks."""
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        (self.work_dir / "output.md").write_text(
+            "1. first question\n2. second question\n", encoding="utf-8"
+        )
+        (self.work_dir / "output.json").write_text(json.dumps([
+            {"id": "e1", "page": 1, "type": "text",
+             "bbox": [0.08, 0.10, 0.50, 0.14], "text": "1. first question",
+             "confidence": 0.98},
+            {"id": "e2", "page": 1, "type": "text",
+             "bbox": [0.08, 0.20, 0.50, 0.24], "text": "2. second question",
+             "confidence": 0.98},
+        ]), encoding="utf-8")
+
+    def test_single_failed_question_does_not_block_others(self):
+        """One question failing gating does not block other questions."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekClientWithFailures(fail_index=1),
+            )
+
+        # Pipeline should complete (not fail)
+        self.assertEqual(report.status, "completed")
+
+        # Quality stats: 1 failed, 1 passed
+        self.assertEqual(report.questions_passed, 1)
+        self.assertEqual(report.questions_failed, 1)
+
+        # Failed ID should be recorded
+        self.assertEqual(len(report.failed_question_ids), 1)
+        self.assertIn("paper_001_q_0001", report.failed_question_ids)
+
+        # Only 1 question saved (the passing one)
+        self.assertEqual(len(repo.saved_results), 1)
+        saved = repo.saved_results[0]
+        self.assertEqual(len(saved.questions), 1)
+        self.assertEqual(len(saved.blocks), 1)
+        self.assertEqual(saved.questions[0].id, "paper_001_q_0002")
+
+    def test_failed_question_blocks_are_excluded_from_asset_identification(self):
+        """Failed-gated layout blocks are not used by downstream asset linking."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekClientWithFailures(fail_index=1),
+            )
+
+        self.assertEqual(
+            repo.identified_block_ids,
+            ["paper_001_qb_2"],
+            "asset identification must only see blocks for saved questions",
+        )
+
+    def test_warning_questions_still_saved(self):
+        """Warning-gated questions are still written to DB."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        # Second question has only 1 choice → warning
+        class FakeDeepSeekWithWarning:
+            def __init__(self):
+                self._called = 0
+
+            def structure_question(self, raw_markdown: str) -> dict:
+                self._called += 1
+                return {
+                    "question_type": "single_choice",
+                    "stem_latex": raw_markdown,
+                    "choices": [{"label": "A", "content_latex": "x=1"}]
+                               if self._called == 2
+                               else [{"label": "A", "content_latex": "x=1"},
+                                     {"label": "B", "content_latex": "x=2"}],
+                    "answer_latex": "A",
+                    "analysis_latex": "",
+                    "knowledge_points": [],
+                    "difficulty": None,
+                    "warnings": [],
+                }
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekWithWarning(),
+            )
+
+        # Both questions saved
+        self.assertEqual(report.questions_passed, 1)
+        self.assertEqual(report.questions_warning, 1)
+        self.assertEqual(report.questions_failed, 0)
+
+        saved = repo.saved_results[0]
+        self.assertEqual(len(saved.questions), 2,
+                         "warning questions should still be saved")
+
+        # Warning code aggregated
+        self.assertIn("too_few_choices", report.quality_warning_counts)
+        self.assertEqual(report.quality_warning_counts["too_few_choices"], 1)
+
+    def test_dry_run_outputs_quality_stats(self):
+        """Dry-run mode still produces quality gating statistics."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                dry_run=True,
+                repository=repo,
+                deepseek_client=FakeDeepSeekClient(),
+            )
+
+        self.assertEqual(report.questions_passed, 2)
+        self.assertEqual(report.questions_failed, 0)
+        self.assertIsInstance(report.quality_warning_counts, dict)
+
+        # Run report on disk should include quality fields
+        report_path = self.work_dir / "run-report.json"
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertIn("questions_passed", data)
+        self.assertIn("questions_warning", data)
+        self.assertIn("questions_failed", data)
+        self.assertIn("failed_question_ids", data)
+        self.assertIn("quality_warning_counts", data)
+
+    def test_failed_question_ids_in_report(self):
+        """Failed question IDs are recorded in the ingestion report."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekClientWithFailures(fail_index=1),
+            )
+
+        self.assertEqual(len(report.failed_question_ids), 1)
+
+        # Verify on-disk report
+        report_path = self.work_dir / "run-report.json"
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(data["failed_question_ids"], report.failed_question_ids)
+
+    def test_all_questions_failed_marks_paper_partial(self):
+        """When ALL questions fail gating, paper status is 'partial'."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekClientAllFailures(),
+            )
+
+        self.assertEqual(report.status, "partial",
+                         "all questions failed should mark paper as partial")
+        self.assertEqual(report.questions_passed, 0)
+        self.assertEqual(report.questions_failed, 2)
+
+        # No questions saved
+        saved = repo.saved_results[0] if repo.saved_results else None
+        if saved:
+            self.assertEqual(len(saved.questions), 0)
+
+    def test_warning_codes_aggregated_correctly(self):
+        """Warning codes are counted and aggregated in the report."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        # Second question has unbalanced latex + no analysis
+        class FakeDeepSeekWithMultipleWarnings:
+            def __init__(self):
+                self._called = 0
+
+            def structure_question(self, raw_markdown: str) -> dict:
+                self._called += 1
+                if self._called == 2:
+                    return {
+                        "question_type": "proof",
+                        "stem_latex": "prove $x",
+                        "choices": [],
+                        "answer_latex": "answer",
+                        "analysis_latex": "",
+                        "knowledge_points": [],
+                        "difficulty": None,
+                        "warnings": [],
+                    }
+                return {
+                    "question_type": "single_choice",
+                    "stem_latex": raw_markdown,
+                    "choices": [{"label": "A", "content_latex": "x=1"},
+                                {"label": "B", "content_latex": "x=2"}],
+                    "answer_latex": "A",
+                    "analysis_latex": "ok",
+                    "knowledge_points": [],
+                    "difficulty": None,
+                    "warnings": [],
+                }
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekWithMultipleWarnings(),
+            )
+
+        # Second question should have both warnings
+        self.assertEqual(report.questions_passed, 1)
+        self.assertEqual(report.questions_warning, 1)
+        self.assertIn("unbalanced_latex_delimiters", report.quality_warning_counts)
+        self.assertIn("missing_analysis", report.quality_warning_counts)
+
+    def test_run_report_json_includes_quality_fields(self):
+        """ADR 013: run-report.json includes quality gating fields."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                repository=repo,
+                deepseek_client=FakeDeepSeekClient(),
+            )
+
+        report_path = self.work_dir / "run-report.json"
+        data = json.loads(report_path.read_text(encoding="utf-8"))
+
+        self.assertIn("questions_passed", data)
+        self.assertIn("questions_warning", data)
+        self.assertIn("questions_failed", data)
+        self.assertIn("failed_question_ids", data)
+        self.assertIn("quality_warning_counts", data)
+        self.assertIsInstance(data["questions_passed"], int)
+        self.assertIsInstance(data["failed_question_ids"], list)
+        self.assertIsInstance(data["quality_warning_counts"], dict)
 
 
 if __name__ == "__main__":
