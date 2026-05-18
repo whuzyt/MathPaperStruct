@@ -43,6 +43,25 @@ MID_TEXT_QUESTION_HINT = re.compile(
     r"[。，；\s](?:第\s*)?([0-9]{1,3})(?:\s*题)?[\.．、)]\s*\S"
 )
 
+# ADR 012: Instruction/preamble cues that suggest a numbered item is NOT a real question
+INSTRUCTION_CUES = (
+    "答题前", "考生须知", "注意事项", "本试卷", "本卷",
+    "考试时间", "满分", "答案写在答题卡", "用2B铅笔", "用 2B 铅笔",
+    "不准使用", "考试结束后", "选择题作答", "非选择题必须",
+    "将答案写在", "答题卡上", "写在试卷上", "试卷满分",
+    "考试用时", "考生务必将", "务必",
+)
+
+# ADR 012: Math content features that suggest a numbered item IS a real question
+MATH_FEATURES = (
+    "已知", "设", "若", "求", "证明", "计算", "函数",
+    "数列", "集合", "方程", "不等式", "概率", "椭圆",
+    "双曲线", "抛物线", "向量", "三角形", "圆",
+    "$", "∠", "△", "⊙", "∥", "⊥", "≤", "≥", "≠",
+    "°", "′", "″", "α", "β", "γ", "θ", "π",
+    "sin", "cos", "tan", "log",
+)
+
 ALLOWED_ELEMENT_TYPES = frozenset({
     "text", "formula", "image", "table", "figure", "line", "header", "footer",
 })
@@ -360,8 +379,10 @@ def detect_question_anchors(
     elements: list[_Element],
     page_columns: dict[int, list[dict[str, Any]]],
     sorted_elements: list[_Element],
-) -> list[_Element]:
-    """Identify question anchor elements. Returns list of anchors in reading order."""
+) -> tuple[list[_Element], list[str]]:
+    """Identify question anchor elements. Returns (anchors, warnings)."""
+    warnings: list[str] = []
+
     # Build answer-section range: once answer section starts, elements after are excluded
     answer_section_pages: set[int] = set()
     in_answer = False
@@ -372,6 +393,13 @@ def detect_question_anchors(
             in_answer = True
             answer_start_orders.append(elem.reading_order)
             answer_section_pages.add(elem.page)
+
+    # Find first formal section reading_order (ADR 012: instruction filtering boundary)
+    first_section_order: int | None = None
+    for elem in sorted_elements:
+        if elem.is_section:
+            first_section_order = elem.reading_order
+            break
 
     # Mark option labels
     for elem in elements:
@@ -428,6 +456,19 @@ def detect_question_anchors(
 
         # text after marker check
         remainder = text[match.end():].strip()
+
+        # ADR 012: instruction/preamble filtering before the first section
+        if first_section_order is not None and elem.reading_order < first_section_order:
+            combined = text
+            if remainder:
+                combined = remainder
+            if _is_instruction_number(elem.text, combined):
+                warnings.append(
+                    f"instruction_number_filtered: {q_number} at {elem.id} "
+                    f"looks like instruction/preamble, not a real question"
+                )
+                continue
+
         if remainder:
             elem.question_number = q_number
             elem.is_question_anchor = True
@@ -444,7 +485,7 @@ def detect_question_anchors(
                     anchors.append(elem)
                     seen_numbers.setdefault(q_number, []).append(elem)
 
-    return anchors
+    return anchors, warnings
 
 
 # ---------------------------------------------------------------------------
@@ -969,7 +1010,8 @@ def layout_ownership(
     all_warnings.extend(sec_warnings)
 
     # Step 6: Question anchor detection
-    anchors = detect_question_anchors(elements, page_columns, sorted_elements)
+    anchors, anchor_warnings = detect_question_anchors(elements, page_columns, sorted_elements)
+    all_warnings.extend(anchor_warnings)
     # 6b: missing_anchor_suspected — OCR-merged question numbers
     missing_warnings = _detect_missing_anchors(elements, sorted_elements, anchors)
     all_warnings.extend(missing_warnings)
@@ -1071,6 +1113,41 @@ def _next_in_reading_order(
         if e.id == elem.id and i + 1 < len(sorted_elements):
             return sorted_elements[i + 1]
     return None
+
+
+def _is_instruction_number(full_text: str, question_text: str) -> bool:
+    """ADR 012: check if a number-matched element is instruction/preamble.
+
+    Returns True if the text contains instruction cues AND lacks math features,
+    meaning it should be filtered out (not treated as a real question anchor).
+    """
+    search_text = full_text + " " + question_text
+    has_cue = any(cue in search_text for cue in INSTRUCTION_CUES)
+    if not has_cue:
+        return False
+    has_math = _has_math_feature(search_text)
+    return not has_math
+
+
+def _has_math_feature(text: str) -> bool:
+    """Return True when text has strong math-question signals.
+
+    Single-character cues such as "求" and "设" are intentionally guarded:
+    instruction prose often contains words like "要求" or "设置", which must not
+    rescue a preamble item from instruction filtering.
+    """
+    for feat in MATH_FEATURES:
+        if feat == "求":
+            if re.search(r"(?<!要)求(?!作答|填写|涂|改|交|使用)", text):
+                return True
+            continue
+        if feat == "设":
+            if re.search(r"设(?!置|备|施|计)", text):
+                return True
+            continue
+        if feat in text:
+            return True
+    return False
 
 
 def _current_section_for(

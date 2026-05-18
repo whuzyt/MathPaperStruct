@@ -1,0 +1,16 @@
+{
+  "name": "instruction preamble numbered items filtered before first section",
+  "elements": [
+    {"id": "e0", "page": 1, "type": "text", "bbox": [0.08, 0.06, 0.50, 0.10], "text": "考生须知"},
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.14, 0.50, 0.18], "text": "1. 本试卷满分150分，考试时间120分钟"},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.22, 0.50, 0.26], "text": "2. 答题前，考生务必将姓名填写在答题卡上"},
+    {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.32, 0.50, 0.36], "text": "一、选择题"},
+    {"id": "e3", "page": 1, "type": "text", "bbox": [0.08, 0.42, 0.50, 0.46], "text": "1. 已知函数$f(x)=x^2$，求$f(2)$的值"},
+    {"id": "e4", "page": 1, "type": "text", "bbox": [0.08, 0.50, 0.50, 0.54], "text": "2. 若$a>b>0$，证明$a^2>b^2$"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_numbers": ["1", "2"],
+    "warnings": ["instruction_number_filtered"]
+  }
+}

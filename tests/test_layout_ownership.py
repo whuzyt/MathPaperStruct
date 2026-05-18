@@ -2,7 +2,11 @@ import json
 import unittest
 from pathlib import Path
 
-from question_bank.services.layout_ownership import layout_ownership
+from question_bank.services.layout_ownership import (
+    _has_math_feature,
+    _is_instruction_number,
+    layout_ownership,
+)
 
 
 FIXTURES_DIR = Path(__file__).resolve().parents[1] / "docs" / "test-fixtures"
@@ -469,6 +473,252 @@ class LayoutOwnershipFixtureTests(unittest.TestCase):
         sh_warnings = [w for w in all_warnings if "section_hierarchy_suspected" in w]
         self.assertEqual(len(sh_warnings), 0,
                          f"should not fire with only 2 occurrences, got: {sh_warnings}")
+
+
+class InstructionFilteringTests(unittest.TestCase):
+    """ADR 012: instruction/preamble filtering in detect_question_anchors."""
+
+    # ------------------------------------------------------------------
+    # Fixture tests
+    # ------------------------------------------------------------------
+
+    def test_instruction_numbered_items_are_filtered(self):
+        """Numbered instruction items before first section are filtered out."""
+        fixture = _load_fixture("layout-case-instruction-number-filtered.json")
+        blocks = layout_ownership("paper_001", fixture["elements"])
+        expected = fixture["expected"]
+
+        self.assertEqual(len(blocks), expected["question_count"])
+        actual_numbers = [b.question_number for b in blocks]
+        self.assertEqual(actual_numbers, expected["question_numbers"])
+
+        all_warnings = _collect_all_warnings(blocks)
+        self.assertTrue(
+            any("instruction_number_filtered" in w for w in all_warnings),
+            f"expected instruction_number_filtered warning, got: {all_warnings}",
+        )
+
+        # Real questions should own their elements
+        all_owned = _collect_all_element_ids(blocks)
+        self.assertIn("e3", all_owned, "real question 1 element must be owned")
+        self.assertIn("e4", all_owned, "real question 2 element must be owned")
+        self.assertNotIn("e1", all_owned, "instruction item 1 must not be owned")
+        self.assertNotIn("e2", all_owned, "instruction item 2 must not be owned")
+
+    def test_no_section_math_first_questions_not_filtered(self):
+        """Math-first questions without any section are NOT filtered."""
+        fixture = _load_fixture("layout-case-no-section-starts-with-question.json")
+        blocks = layout_ownership("paper_001", fixture["elements"])
+        expected = fixture["expected"]
+
+        self.assertEqual(len(blocks), expected["question_count"])
+        actual_numbers = [b.question_number for b in blocks]
+        self.assertEqual(actual_numbers, expected["question_numbers"])
+
+        all_warnings = _collect_all_warnings(blocks)
+        instruction_warnings = [
+            w for w in all_warnings if "instruction_number_filtered" in w
+        ]
+        self.assertEqual(
+            len(instruction_warnings), 0,
+            f"math-first questions must not be filtered, got: {instruction_warnings}",
+        )
+
+    def test_preamble_filtered_section_questions_preserved(self):
+        """Preamble items filtered, section questions preserved."""
+        fixture = _load_fixture("layout-case-preamble-then-section.json")
+        blocks = layout_ownership("paper_001", fixture["elements"])
+        expected = fixture["expected"]
+
+        self.assertEqual(len(blocks), expected["question_count"])
+        actual_numbers = [b.question_number for b in blocks]
+        self.assertEqual(actual_numbers, expected["question_numbers"])
+
+        all_warnings = _collect_all_warnings(blocks)
+        self.assertTrue(
+            any("instruction_number_filtered" in w for w in all_warnings),
+            f"expected instruction_number_filtered warning, got: {all_warnings}",
+        )
+
+        # Section questions must be owned
+        all_owned = _collect_all_element_ids(blocks)
+        self.assertIn("e1", all_owned, "section question 1 must be owned")
+        self.assertIn("e2", all_owned, "section question 2 must be owned")
+        self.assertNotIn("e_p1", all_owned, "preamble item 1 must not be owned")
+        self.assertNotIn("e_p2", all_owned, "preamble item 2 must not be owned")
+
+    # ------------------------------------------------------------------
+    # Math features override instruction cues
+    # ------------------------------------------------------------------
+
+    def test_math_features_prevent_filtering(self):
+        """Instruction cue + math feature in same text → NOT filtered."""
+        # "注意事项" is an instruction cue, but "已知" and "函数" are math features
+        elements = [
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14],
+             "text": "1. 注意事项：已知函数$f(x)=x^2$，求最小值"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24],
+             "text": "2. 普通题目"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 2,
+                         f"math features should prevent filtering, got {len(blocks)} blocks")
+        all_warnings = _collect_all_warnings(blocks)
+        instruction_warnings = [
+            w for w in all_warnings if "instruction_number_filtered" in w
+        ]
+        self.assertEqual(len(instruction_warnings), 0,
+                         f"math features should prevent instruction filter, got: {instruction_warnings}")
+
+    def test_instruction_cue_without_math_is_filtered(self):
+        """Instruction cue without math feature → filtered."""
+        elements = [
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14],
+             "text": "1. 本试卷共4页，满分150分"},
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.22, 0.50, 0.26],
+             "text": "一、选择题"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.32, 0.50, 0.36],
+             "text": "1. 已知集合$A=\\{1,2,3\\}$"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 1,
+                         f"instruction without math should be filtered, got {len(blocks)} blocks")
+        self.assertEqual(blocks[0].question_number, "1")
+        all_warnings = _collect_all_warnings(blocks)
+        self.assertTrue(
+            any("instruction_number_filtered" in w for w in all_warnings),
+            f"expected instruction_number_filtered warning, got: {all_warnings}",
+        )
+
+    # ------------------------------------------------------------------
+    # _is_instruction_number unit tests
+    # ------------------------------------------------------------------
+
+    def test_is_instruction_number_pure_instruction(self):
+        self.assertTrue(_is_instruction_number(
+            "1. 本试卷满分150分", "本试卷满分150分"
+        ))
+
+    def test_is_instruction_number_with_math_feature(self):
+        self.assertFalse(_is_instruction_number(
+            "1. 已知函数f(x)=x^2", "已知函数f(x)=x^2"
+        ))
+
+    def test_is_instruction_number_no_cue(self):
+        self.assertFalse(_is_instruction_number(
+            "1. 普通题目不含关键词", "普通题目不含关键词"
+        ))
+
+    def test_is_instruction_number_math_override_cue(self):
+        """Math features override instruction cues."""
+        self.assertFalse(_is_instruction_number(
+            "1. 注意事项：已知椭圆方程求解", "注意事项：已知椭圆方程求解"
+        ))
+
+    def test_is_instruction_number_empty_text(self):
+        self.assertFalse(_is_instruction_number("", ""))
+
+    def test_is_instruction_number_dollar_sign_is_math_feature(self):
+        """$ is a math feature that prevents filtering."""
+        self.assertFalse(_is_instruction_number(
+            "1. 本试卷含公式$f(x)$", "本试卷含公式$f(x)$"
+        ))
+
+    def test_instruction_requirements_do_not_trigger_math_feature(self):
+        """'要求' in instruction prose must not count as math '求'."""
+        self.assertFalse(_has_math_feature(
+            "不按以上要求作答的答案无效"
+        ))
+        self.assertTrue(_is_instruction_number(
+            "1．答题前填写姓名，不按以上要求作答的答案无效",
+            "答题前填写姓名，不按以上要求作答的答案无效",
+        ))
+
+    def test_no_section_instruction_like_text_not_filtered(self):
+        """Without a formal section boundary, ADR 012 filter stays inactive."""
+        elements = [
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14],
+             "text": "1. 本题满分10分，求答案"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.20, 0.50, 0.24],
+             "text": "2. 本题满分12分，求答案"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual([b.question_number for b in blocks], ["1", "2"])
+        all_warnings = _collect_all_warnings(blocks)
+        self.assertFalse(any("instruction_number_filtered" in w for w in all_warnings))
+
+    # ------------------------------------------------------------------
+    # Warning code presence
+    # ------------------------------------------------------------------
+
+    def test_instruction_number_filtered_warning_in_blocks(self):
+        """instruction_number_filtered warning appears in block warnings."""
+        elements = [
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.10, 0.50, 0.14],
+             "text": "1. 答题前请填写姓名"},
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.22, 0.50, 0.26],
+             "text": "一、选择题"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.32, 0.50, 0.36],
+             "text": "1. 已知$x>0$，求最小值"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        all_warnings = _collect_all_warnings(blocks)
+        filtered_warnings = [
+            w for w in all_warnings if "instruction_number_filtered" in w
+        ]
+        self.assertEqual(len(filtered_warnings), 1,
+                         f"expected 1 instruction_number_filtered, got: {filtered_warnings}")
+        self.assertIn("1 at e1", filtered_warnings[0])
+
+    # ------------------------------------------------------------------
+    # paper_0086 scenario: 23 → 22 correction
+    # ------------------------------------------------------------------
+
+    def test_instruction_filtered_does_not_create_question_block(self):
+        """Filtered instruction items create NO question blocks."""
+        elements = [
+            {"id": "e_inst1", "page": 1, "type": "text", "bbox": [0.08, 0.06, 0.50, 0.10],
+             "text": "1. 注意事项：本试卷满分150分"},
+            {"id": "e_inst2", "page": 1, "type": "text", "bbox": [0.08, 0.14, 0.50, 0.18],
+             "text": "2. 答题前填写姓名和准考证号"},
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30],
+             "text": "一、选择题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.36, 0.50, 0.40],
+             "text": "1. 已知集合$A=\\{1,2,3\\}$"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        # Only 1 real question, not 3
+        self.assertEqual(len(blocks), 1,
+                         f"only real question should remain, got {len(blocks)} blocks")
+        self.assertEqual(blocks[0].question_number, "1")
+        # Verify the real question owns its text
+        self.assertIn("e1", blocks[0].element_ids)
+
+    # ------------------------------------------------------------------
+    # After-section anchors NOT checked (scope boundary)
+    # ------------------------------------------------------------------
+
+    def test_instruction_cues_after_section_are_not_filtered(self):
+        """After the first section, instruction cues are NOT checked — only
+        preamble anchors are filtered. A question after a section that happens
+        to contain '满分' (e.g. '本题满分10分') must NOT be filtered."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.06, 0.50, 0.10],
+             "text": "一、解答题"},
+            {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.16, 0.50, 0.20],
+             "text": "1. （本题满分10分）已知函数$f(x)$"},
+            {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30],
+             "text": "2. （本题满分12分）设数列$\\{a_n\\}$"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 2,
+                         f"after-section '满分' must not be filtered, got {len(blocks)} blocks")
+        all_warnings = _collect_all_warnings(blocks)
+        instruction_warnings = [
+            w for w in all_warnings if "instruction_number_filtered" in w
+        ]
+        self.assertEqual(len(instruction_warnings), 0,
+                         f"after-section must not be checked for instruction cues, got: {instruction_warnings}")
 
 
 def _collect_all_warnings(blocks) -> list[str]:

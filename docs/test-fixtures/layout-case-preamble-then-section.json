@@ -1,0 +1,15 @@
+{
+  "name": "preamble numbered items filtered, section questions preserved",
+  "elements": [
+    {"id": "e_p1", "page": 1, "type": "text", "bbox": [0.08, 0.06, 0.50, 0.10], "text": "1. 本试卷分为选择题和非选择题两部分，共150分"},
+    {"id": "e_p2", "page": 1, "type": "text", "bbox": [0.08, 0.14, 0.50, 0.18], "text": "2. 考生务必将答案写在答题卡上，考试结束后交回"},
+    {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.26, 0.50, 0.30], "text": "一、选择题"},
+    {"id": "e1", "page": 1, "type": "text", "bbox": [0.08, 0.36, 0.50, 0.40], "text": "1. 若集合$A=\\{1,2,3\\}$，则$A$的子集个数为"},
+    {"id": "e2", "page": 1, "type": "text", "bbox": [0.08, 0.44, 0.50, 0.48], "text": "2. 已知椭圆$C$的方程为$\\frac{x^2}{4}+y^2=1$，则其离心率为"}
+  ],
+  "expected": {
+    "question_count": 2,
+    "question_numbers": ["1", "2"],
+    "warnings": ["instruction_number_filtered"]
+  }
+}
