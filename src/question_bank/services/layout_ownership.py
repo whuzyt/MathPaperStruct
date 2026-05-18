@@ -10,7 +10,7 @@ from typing import Any
 # Patterns (ADR 001)
 # ---------------------------------------------------------------------------
 SECTION_PATTERN = re.compile(
-    r"^[一二三四五六七八九十]+[、.．]\s*(选择|填空|解答|计算|证明|应用|综合|压轴).*$"
+    r"^[一二三四五六七八九十]+[、.．]\s*(选择|非选择|填空|解答|计算|证明|应用|综合|压轴).*$"
 )
 # Non-standard section markers: "向量小题A", "考点一", "专题二", "第3章" etc.
 ALT_SECTION_PATTERN = re.compile(
@@ -49,7 +49,15 @@ INSTRUCTION_CUES = (
     "考试时间", "满分", "答案写在答题卡", "用2B铅笔", "用 2B 铅笔",
     "不准使用", "考试结束后", "选择题作答", "非选择题必须",
     "将答案写在", "答题卡上", "写在试卷上", "试卷满分",
-    "考试用时", "考生务必将", "务必",
+    "考试用时", "考生务必将", "务必", "每小题", "本卷共",
+    "参考公式", "答案标号", "涂黑", "黑色墨水", "钢笔或签字笔",
+    "用铅笔",
+)
+
+STRONG_INSTRUCTION_CUES = (
+    "答题前", "考生须知", "注意事项", "每小题", "参考公式",
+    "答案标号", "涂黑", "黑色墨水", "钢笔或签字笔", "答题卡上",
+    "将答案写在", "写在试卷上", "用2B铅笔", "用 2B 铅笔", "用铅笔",
 )
 
 # ADR 012: Math content features that suggest a numbered item IS a real question
@@ -394,13 +402,6 @@ def detect_question_anchors(
             answer_start_orders.append(elem.reading_order)
             answer_section_pages.add(elem.page)
 
-    # Find first formal section reading_order (ADR 012: instruction filtering boundary)
-    first_section_order: int | None = None
-    for elem in sorted_elements:
-        if elem.is_section:
-            first_section_order = elem.reading_order
-            break
-
     # Mark option labels
     for elem in elements:
         if elem.is_noise or elem.is_header_footer:
@@ -457,17 +458,15 @@ def detect_question_anchors(
         # text after marker check
         remainder = text[match.end():].strip()
 
-        # ADR 012: instruction/preamble filtering before the first section
-        if first_section_order is not None and elem.reading_order < first_section_order:
-            combined = text
-            if remainder:
-                combined = remainder
-            if _is_instruction_number(elem.text, combined):
-                warnings.append(
-                    f"instruction_number_filtered: {q_number} at {elem.id} "
-                    f"looks like instruction/preamble, not a real question"
-                )
-                continue
+        # ADR 017: numbered instructions can appear before any paper part, not
+        # only before the first formal section.
+        combined = remainder if remainder else text
+        if _is_instruction_number(elem.text, combined):
+            warnings.append(
+                f"instruction_number_filtered: {q_number} at {elem.id} "
+                f"looks like instruction/preamble, not a real question"
+            )
+            continue
 
         if remainder:
             elem.question_number = q_number
@@ -1125,8 +1124,23 @@ def _is_instruction_number(full_text: str, question_text: str) -> bool:
     has_cue = any(cue in search_text for cue in INSTRUCTION_CUES)
     if not has_cue:
         return False
+    if any(cue in search_text for cue in STRONG_INSTRUCTION_CUES):
+        return not _has_problem_action(search_text)
     has_math = _has_math_feature(search_text)
     return not has_math
+
+
+def _has_problem_action(text: str) -> bool:
+    """Return True for action verbs that make an item look like an actual problem."""
+    if any(token in text for token in ("已知", "证明", "计算", "解答")):
+        return True
+    if re.search(r"(?<!要)求(?!作答|填写|涂|改|交|使用)", text):
+        return True
+    if re.search(r"设(?!置|备|施|计)", text):
+        return True
+    if re.search(r"若(?!干)", text):
+        return True
+    return False
 
 
 def _has_math_feature(text: str) -> bool:

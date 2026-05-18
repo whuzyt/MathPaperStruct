@@ -695,13 +695,11 @@ class InstructionFilteringTests(unittest.TestCase):
         self.assertIn("e1", blocks[0].element_ids)
 
     # ------------------------------------------------------------------
-    # After-section anchors NOT checked (scope boundary)
+    # After-section real questions with instruction-like words are preserved.
     # ------------------------------------------------------------------
 
     def test_instruction_cues_after_section_are_not_filtered(self):
-        """After the first section, instruction cues are NOT checked — only
-        preamble anchors are filtered. A question after a section that happens
-        to contain '满分' (e.g. '本题满分10分') must NOT be filtered."""
+        """A real question with '满分' and math action cues must NOT be filtered."""
         elements = [
             {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.06, 0.50, 0.10],
              "text": "一、解答题"},
@@ -718,7 +716,46 @@ class InstructionFilteringTests(unittest.TestCase):
             w for w in all_warnings if "instruction_number_filtered" in w
         ]
         self.assertEqual(len(instruction_warnings), 0,
-                         f"after-section must not be checked for instruction cues, got: {instruction_warnings}")
+                         f"real math questions must not be filtered, got: {instruction_warnings}")
+
+    def test_later_instruction_blocks_are_filtered(self):
+        """ADR 017: numbered instructions before later paper parts are filtered."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.08],
+             "text": "一、选择题"},
+            {"id": "q1", "page": 1, "type": "text", "bbox": [0.08, 0.12, 0.50, 0.16],
+             "text": "1. 已知集合$A=\\{1,2\\}$，求$A$的子集个数"},
+            {"id": "s2", "page": 2, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.08],
+             "text": "二、非选择题"},
+            {"id": "inst1", "page": 2, "type": "text", "bbox": [0.08, 0.12, 0.70, 0.16],
+             "text": "1．用黑色墨水的钢笔或签字笔将答案写在答题卡上"},
+            {"id": "inst2", "page": 2, "type": "text", "bbox": [0.08, 0.18, 0.70, 0.22],
+             "text": "2．本卷共11小题，共105分"},
+            {"id": "q2", "page": 2, "type": "text", "bbox": [0.08, 0.30, 0.50, 0.34],
+             "text": "1. 已知函数$f(x)=x^2$，求$f(2)$"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual([b.question_number for b in blocks], ["1", "1"])
+        all_owned = _collect_all_element_ids(blocks)
+        self.assertNotIn("inst1", all_owned)
+        self.assertNotIn("inst2", all_owned)
+        all_warnings = _collect_all_warnings(blocks)
+        filtered = [w for w in all_warnings if "instruction_number_filtered" in w]
+        self.assertEqual(len(filtered), 2)
+
+    def test_reference_formula_instruction_is_filtered_despite_math_symbols(self):
+        """ADR 017: reference-formula instruction blocks should not be rescued by '$'."""
+        elements = [
+            {"id": "s1", "page": 1, "type": "text", "bbox": [0.08, 0.05, 0.50, 0.08],
+             "text": "一、选择题"},
+            {"id": "inst", "page": 1, "type": "text", "bbox": [0.08, 0.12, 0.80, 0.22],
+             "text": "1．每小题选出答案后，用铅笔涂黑。参考公式：$P(A\\cup B)=P(A)+P(B)$"},
+            {"id": "q1", "page": 1, "type": "text", "bbox": [0.08, 0.32, 0.50, 0.36],
+             "text": "1. 已知事件$A$，求$P(A)$"},
+        ]
+        blocks = layout_ownership("paper_001", elements)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0].element_ids, ["q1"])
 
 
 def _collect_all_warnings(blocks) -> list[str]:

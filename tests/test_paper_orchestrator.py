@@ -803,6 +803,36 @@ class FakeDeepSeekClientAllFailures:
         }
 
 
+class FakeDeepSeekClientMalformedOnce:
+    """Fake that fails once, then returns a valid payload on retry."""
+
+    def __init__(self):
+        self.call_count = 0
+
+    def structure_question(self, raw_markdown: str) -> dict:
+        self.call_count += 1
+        if self.call_count == 1:
+            raise ValueError("DeepSeek response must be a JSON object.")
+        return {
+            "question_type": "single_choice",
+            "stem_latex": raw_markdown,
+            "choices": [{"label": "A", "content_latex": "x=1"},
+                        {"label": "B", "content_latex": "x=2"}],
+            "answer_latex": "A",
+            "analysis_latex": "ok",
+            "knowledge_points": [],
+            "difficulty": None,
+            "warnings": [],
+        }
+
+
+class FakeDeepSeekClientAlwaysMalformed:
+    """Fake that always fails so orchestrator must produce a fallback question."""
+
+    def structure_question(self, raw_markdown: str) -> dict:
+        raise ValueError("DeepSeek response must be a JSON object.")
+
+
 class TestQualityGatingIntegration(unittest.TestCase):
     """ADR 013: quality gating end-to-end integration tests."""
 
@@ -1139,6 +1169,63 @@ class TestQualityGatingIntegration(unittest.TestCase):
         self.assertIsInstance(data["questions_passed"], int)
         self.assertIsInstance(data["failed_question_ids"], list)
         self.assertIsInstance(data["quality_warning_counts"], dict)
+
+    def test_deepseek_single_question_retry_recovers_malformed_response(self):
+        """ADR 017: one malformed DeepSeek response is retried per question."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+        client = FakeDeepSeekClientMalformedOnce()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                dry_run=True,
+                repository=repo,
+                deepseek_client=client,
+            )
+
+        self.assertEqual(report.status, "completed")
+        self.assertEqual(report.questions_failed, 0)
+        self.assertEqual(report.counts["deepseek_structure"], 2)
+        self.assertGreaterEqual(client.call_count, 3)
+
+    def test_deepseek_single_question_fallback_prevents_paper_failure(self):
+        """ADR 017: repeated DeepSeek failure creates a per-question fallback."""
+        self._make_two_question_output()
+        repo = FakeRepository()
+
+        with mock.patch(
+            "question_bank.services.paper_orchestrator.LocalMinerURunner"
+        ) as mock_mineru:
+            mock_mineru.return_value.parse_pdf.return_value = mock.MagicMock(
+                markdown_path=self.work_dir / "output.md",
+                raw_json_path=self.work_dir / "output.json",
+            )
+
+            report = ingest_paper_full(
+                paper_id="paper_001",
+                pdf_path="/tmp/test.pdf",
+                work_dir=str(self.work_dir),
+                asset_dir=str(self.asset_dir),
+                dry_run=True,
+                repository=repo,
+                deepseek_client=FakeDeepSeekClientAlwaysMalformed(),
+            )
+
+        self.assertEqual(report.status, "completed")
+        self.assertEqual(report.questions_failed, 0)
+        self.assertEqual(report.questions_warning, 2)
+        self.assertIn("deepseek_fallback", report.quality_warning_counts)
 
 
 if __name__ == "__main__":

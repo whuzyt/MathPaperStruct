@@ -663,6 +663,57 @@ def _harden_question(
             question.stem_latex = question.stem_latex + " [图]"
 
 
+def _structure_question_with_fallback(
+    deepseek_client,
+    raw_markdown: str,
+    max_attempts: int = 2,
+) -> dict:
+    """ADR 017: isolate DeepSeek failures to a single question block.
+
+    A malformed model response should not fail the whole paper. We retry once;
+    if the model still fails, preserve the raw block as a reviewable fallback.
+    """
+    errors: list[str] = []
+    for attempt in range(1, max_attempts + 1):
+        try:
+            payload = deepseek_client.structure_question(raw_markdown)
+        except Exception as exc:
+            errors.append(str(exc))
+            continue
+        if attempt > 1:
+            payload.setdefault("warnings", []).append(
+                f"deepseek_retry: recovered on attempt {attempt} after {errors[-1][:160]}"
+            )
+        return payload
+
+    last_error = errors[-1] if errors else "unknown DeepSeek failure"
+    stem = raw_markdown.strip() or "（DeepSeek结构化失败，原始题块为空）"
+    return {
+        "question_type": "short_answer",
+        "stem_latex": stem,
+        "choices": [],
+        "answer_latex": "暂无答案，待人工补充",
+        "analysis_latex": "暂无解析，待人工补充",
+        "knowledge_points": [],
+        "difficulty": None,
+        "warnings": [f"deepseek_fallback: {last_error[:200]}"],
+    }
+
+
+def _apply_deepseek_fallback_gate(
+    gate_result: GatingResult,
+    payload: dict,
+) -> GatingResult:
+    warnings = [str(w) for w in payload.get("warnings", []) if str(w).strip()]
+    if not any(w.startswith("deepseek_fallback") for w in warnings):
+        return gate_result
+    if "deepseek_fallback" not in gate_result.warning_codes:
+        gate_result.warning_codes.append("deepseek_fallback")
+    if gate_result.gate == "pass":
+        gate_result.gate = "warning"
+    return gate_result
+
+
 # ---------------------------------------------------------------------------
 # Step 3: DeepSeek structure — uses layout_ownership blocks from ctx
 # ---------------------------------------------------------------------------
@@ -699,8 +750,10 @@ def _step_deepseek_structure(
         qb = _layout_block_to_question_block(lb, paper_id, elements_by_id)
         question_blocks.append(qb)
 
-        # DeepSeek structuring using element text (not raw markdown splitter)
-        payload = deepseek_client.structure_question(qb.raw_markdown)
+        # DeepSeek structuring using element text (not raw markdown splitter).
+        # ADR 017: retry/fallback per question so one malformed response does
+        # not fail the entire paper.
+        payload = _structure_question_with_fallback(deepseek_client, qb.raw_markdown)
         question = _question_from_payload(paper_id, index, payload)
 
         if not question.choices:
@@ -729,6 +782,7 @@ def _step_deepseek_structure(
 
         # ADR 013: quality gating
         gate_result = gate_question(question, qb)
+        gate_result = _apply_deepseek_fallback_gate(gate_result, payload)
         gate_results.append(gate_result)
 
     # Build full ProcessingResult (all questions, for reporting)
