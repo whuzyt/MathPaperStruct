@@ -523,7 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     work_root.mkdir(parents=True, exist_ok=True)
 
     # Lazy imports
-    from question_bank.config import Settings
+    from question_bank.config import Settings, psycopg_conninfo
     from question_bank.services.deepseek import DeepSeekHTTPClient
 
     settings = Settings.load()
@@ -551,7 +551,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
 
         repository = PostgresQuestionBankRepository(
-            psycopg.connect(settings.database_url)
+            psycopg.connect(psycopg_conninfo(settings.database_url))
         )
 
     print(f"ADR 014 — Real DeepSeek Structure Quality Evaluation")

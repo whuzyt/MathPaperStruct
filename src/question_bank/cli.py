@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from typing import TextIO
 
-from question_bank.config import Settings
+from question_bank.config import Settings, psycopg_conninfo
 from question_bank.ingestion import PDFIngestionError, PDFIngestionService
 from question_bank.pipeline import ProcessingPipeline, ProcessingResult
 from question_bank.repository import PostgresQuestionBankRepository
@@ -315,7 +315,7 @@ def _build_repository(save_db: bool):
         raise RuntimeError("psycopg is required when --save-db is set. Install project dependencies.") from exc
 
     settings = Settings.load()
-    connection = psycopg.connect(settings.database_url)
+    connection = psycopg.connect(psycopg_conninfo(settings.database_url))
     return PostgresQuestionBankRepository(connection)
 
 
@@ -327,7 +327,7 @@ def _run_db_init(stdout: TextIO, stderr: TextIO) -> int:
         return 2
 
     settings = Settings.load()
-    connection = psycopg.connect(settings.database_url)
+    connection = psycopg.connect(psycopg_conninfo(settings.database_url))
     cursor = connection.cursor()
     try:
         for schema_path in _schema_paths():
@@ -351,7 +351,7 @@ def _run_review_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
     for item in repository.list_review_queue(limit=args.limit):
         errors = ",".join(item.error_codes) or "-"
         warnings = ",".join(item.model_warnings) or "-"
@@ -405,7 +405,7 @@ def _run_duplicate_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     if args.group_id:
         group = repository.get_duplicate_group(args.group_id)
@@ -438,7 +438,7 @@ def _run_duplicate_decide(args: argparse.Namespace, stdout: TextIO, stderr: Text
     from question_bank.services.duplicate_review import ReviewDecision
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     decision = ReviewDecision(
         group_id=args.group_id,
@@ -460,7 +460,7 @@ def _run_canonicalize_generate(args: argparse.Namespace, stdout: TextIO, stderr:
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
     try:
         result = repository.canonicalize_group(args.group_id, args.created_by)
     except ValueError as exc:
@@ -490,7 +490,7 @@ def _run_canonicalize_list(args: argparse.Namespace, stdout: TextIO, stderr: Tex
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     if args.canonical_id:
         cq = repository.get_canonical_question(args.canonical_id)
@@ -522,7 +522,7 @@ def _run_canonicalize_rollback(args: argparse.Namespace, stdout: TextIO, stderr:
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
     try:
         repository.rollback_canonical(args.canonical_id, args.created_by)
     except Exception as exc:
@@ -569,7 +569,7 @@ def _run_asset_generate(args: argparse.Namespace, stdout: TextIO, stderr: TextIO
     blocks = layout_ownership(args.paper_id, raw_elements)
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
     try:
         result = repository.identify_paper_assets(args.paper_id, blocks, elements_by_id)
     except Exception as exc:
@@ -594,7 +594,7 @@ def _run_asset_list(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     if args.canonical:
         candidates = repository.list_asset_candidates()
@@ -626,7 +626,7 @@ def _run_asset_crop(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) ->
         return 2
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     raw_assets = repository.list_raw_assets(paper_id=args.paper_id, limit=10000)
     if not raw_assets:
@@ -705,7 +705,7 @@ def _run_asset_phash(args: argparse.Namespace, stdout: TextIO, stderr: TextIO) -
     from question_bank.services.image_phash import compute_phash
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     raw_assets = repository.list_raw_assets(paper_id=args.paper_id, limit=10000)
     print(f"Computing pHash for {len(raw_assets)} assets…", file=stdout)
@@ -754,7 +754,7 @@ def _run_asset_visual_candidates(args: argparse.Namespace, stdout: TextIO, stder
     from question_bank.services.asset_visual_dedup import generate_visual_asset_candidates
 
     settings = Settings.load()
-    repository = PostgresQuestionBankRepository(psycopg.connect(settings.database_url))
+    repository = PostgresQuestionBankRepository(psycopg.connect(psycopg_conninfo(settings.database_url)))
 
     raw_assets = repository.list_raw_assets(limit=args.limit)
     candidates = generate_visual_asset_candidates(
@@ -798,7 +798,7 @@ def _run_paper_ingest_full(args: argparse.Namespace, stdout: TextIO, stderr: Tex
                 return 2
 
             repository = PostgresQuestionBankRepository(
-                psycopg.connect(settings.database_url)
+                psycopg.connect(psycopg_conninfo(settings.database_url))
             )
 
         deepseek_client = _build_deepseek_client(args.use_real_deepseek, settings)

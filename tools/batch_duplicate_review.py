@@ -110,11 +110,11 @@ def _save_groups_to_db(groups: list) -> None:
         print("psycopg is required for --save-db. Install project dependencies.", file=sys.stderr)
         return
 
-    from question_bank.config import Settings
+    from question_bank.config import Settings, psycopg_conninfo
     from question_bank.repository import PostgresQuestionBankRepository
 
     settings = Settings.load()
-    connection = psycopg.connect(settings.database_url)
+    connection = psycopg.connect(psycopg_conninfo(settings.database_url))
     try:
         repo = PostgresQuestionBankRepository(connection)
         for group in groups:

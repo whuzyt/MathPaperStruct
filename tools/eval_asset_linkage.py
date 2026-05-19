@@ -514,10 +514,10 @@ def main(argv: list[str] | None = None) -> int:
     work_root.mkdir(parents=True, exist_ok=True)
 
     # --- Database setup ---
-    from question_bank.config import Settings
+    from question_bank.config import Settings, psycopg_conninfo
 
     settings = Settings.load()
-    db_url = args.db_url or settings.database_url
+    db_url = psycopg_conninfo(args.db_url or settings.database_url)
 
     try:
         import psycopg

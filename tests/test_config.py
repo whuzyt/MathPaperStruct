@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from question_bank.config import Settings
+from question_bank.config import Settings, psycopg_conninfo
 
 
 class SettingsTest(unittest.TestCase):
@@ -53,6 +53,18 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(value=value):
                 settings = Settings.from_env({"ENABLE_LAYOUT_OWNERSHIP": value})
                 self.assertTrue(settings.enable_layout_ownership)
+
+    def test_psycopg_conninfo_normalizes_sqlalchemy_driver_url(self):
+        self.assertEqual(
+            psycopg_conninfo("postgresql+psycopg://u:p@localhost:5432/db"),
+            "postgresql://u:p@localhost:5432/db",
+        )
+
+    def test_psycopg_conninfo_preserves_native_url(self):
+        self.assertEqual(
+            psycopg_conninfo("postgresql://u:p@localhost:5432/db"),
+            "postgresql://u:p@localhost:5432/db",
+        )
 
 
 if __name__ == "__main__":

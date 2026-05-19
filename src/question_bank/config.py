@@ -54,5 +54,12 @@ def _blank_to_none(value: str | None) -> str | None:
     return value
 
 
+def psycopg_conninfo(database_url: str) -> str:
+    """Convert project DB URLs into a conninfo string accepted by psycopg."""
+    if database_url.startswith("postgresql+psycopg://"):
+        return "postgresql://" + database_url[len("postgresql+psycopg://"):]
+    return database_url
+
+
 def _parse_bool(value: str) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
