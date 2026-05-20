@@ -1,4 +1,4 @@
-"""ADR 020: Small-Scale Real Ingestion Beta evaluation tool.
+"""ADR 020/021: Small-Scale Real Ingestion Beta evaluation tool.
 
 Validates the full ingestion path with real DeepSeek, non-dry-run PostgreSQL
 writes, asset linkage, crop/pHash pipeline, and duplicate/visual candidates
@@ -7,6 +7,8 @@ across 20 PDFs.
 Usage:
   python3 tools/eval_real_e2e_beta.py --pdf-dir data/beta/pdf --limit 20
   python3 tools/eval_real_e2e_beta.py --pdf-dir data/beta/pdf --limit 20 --resume
+  python3 tools/eval_real_e2e_beta.py --pdf-dir data/beta/pdf --only-index 12 --resume
+  python3 tools/eval_real_e2e_beta.py --summarize-existing --work-root data/runs/real_beta_2026-05-19
 """
 
 from __future__ import annotations
@@ -30,13 +32,21 @@ from tools.eval_deepseek_structure import count_pages
 # ---------------------------------------------------------------------------
 
 
+class _ADR021ArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        if not parsed.summarize_existing and not parsed.pdf_dir:
+            self.error("--pdf-dir is required unless --summarize-existing is used")
+        return parsed
+
+
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Real E2E ingestion beta evaluation (ADR 020)"
+    parser = _ADR021ArgumentParser(
+        description="Real E2E ingestion beta evaluation (ADR 020/021)"
     )
     parser.add_argument(
-        "--pdf-dir", type=Path, required=True,
-        help="Directory containing PDF files to process")
+        "--pdf-dir", type=Path,
+        help="Directory containing PDF files to process (required unless --summarize-existing)")
     parser.add_argument(
         "--limit", type=int, default=20,
         help="Max number of PDFs to process (default: 20)")
@@ -55,6 +65,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--report-dir", type=Path, default=Path("docs/eval"),
         help="Output directory for eval report (default: docs/eval)")
+    # ADR 021: summarise existing run reports without re-ingesting
+    parser.add_argument(
+        "--summarize-existing", action="store_true",
+        help="Recompute md+json summary from existing run-report.json files "
+             "(no re-ingestion, requires DB for asset link queries)")
+    # ADR 021: single-PDF re-run
+    parser.add_argument(
+        "--only-index", type=int, default=None,
+        help="Process only the Nth PDF (1-indexed) — for single-paper re-runs")
+    parser.add_argument(
+        "--only-paper", type=str, default=None,
+        help="Process only the PDF matching this paper ID prefix or name")
     return parser
 
 
@@ -190,6 +212,8 @@ def _process_one_pdf(
         "duplicate_candidates": duplicate_candidates,
         "visual_candidates": visual_candidates,
         "elapsed_s": round(elapsed, 1),
+        "retry_count": 0,
+        "previous_error": None,
         "error": error,
     }
 
@@ -223,17 +247,38 @@ def _process_one_safe(
     mineru_command: str,
     repository,
 ) -> dict[str, Any]:
-    """Wrap _process_one_pdf with failure isolation."""
+    """Wrap _process_one_pdf with failure isolation and ADR 021 retry tracking."""
+    paper_id = f"{prefix}_{index:04d}"
+    work_dir = work_root / paper_id
+    previous_error = None
+
+    # ADR 021: preserve previous run-report.json if it exists (retry tracking)
+    previous_report_path = work_dir / "run-report.json"
+    if previous_report_path.exists():
+        try:
+            prev_data = json.loads(previous_report_path.read_text(encoding="utf-8"))
+            prev_status = prev_data.get("status", "unknown")
+            if prev_status == "failed":
+                prev_errors = prev_data.get("errors", [])
+                previous_error = "; ".join(prev_errors[:3]) if prev_errors else "previous run failed"
+            previous_report_path.rename(work_dir / "run-report.previous.json")
+        except Exception:
+            pass
+
     try:
-        return _process_one_pdf(
+        result = _process_one_pdf(
             pdf_path, index, prefix, work_root, asset_dir,
             resume, deepseek_client, mineru_command, repository,
         )
+        if previous_error:
+            result["retry_count"] = result.get("retry_count", 0) + 1
+            result["previous_error"] = previous_error[:200]
+        return result
     except Exception as exc:
         return {
-            "paper_id": f"{prefix}_{index:04d}",
+            "paper_id": paper_id,
             "pdf_path": str(pdf_path),
-            "work_dir": str(work_root / f"{prefix}_{index:04d}"),
+            "work_dir": str(work_dir),
             "status": "failed",
             "pages": None,
             "layout_q": 0,
@@ -253,6 +298,8 @@ def _process_one_safe(
             "duplicate_candidates": 0,
             "visual_candidates": 0,
             "elapsed_s": 0,
+            "retry_count": 0,
+            "previous_error": previous_error[:200] if previous_error else None,
             "error": str(exc),
         }
 
@@ -354,21 +401,27 @@ def _generate_markdown_report(results: list[dict], elapsed: float) -> str:
     # Per-paper results table
     lines.append("## Per-Paper Results")
     lines.append("")
-    header = ("| Paper ID | Pg | Layout | Struct | Pass | Warn | Fail | "
-              "Assets | Links | CropOK | CropFail | pHash | Dup | Vis | Status |")
-    sep = ("|----------|----|--------|--------|------|------|------|"
-           "--------|-------|--------|----------|-------|-----|-----|--------|")
+    has_retries = any(r.get("retry_count", 0) > 0 for r in results)
+    header = "| Paper ID | Pg | Layout | Struct | Pass | Warn | Fail | "
+    if has_retries:
+        header += "Rtry | "
+    header += "Assets | Links | CropOK | CropFail | pHash | Dup | Vis | Status |"
+    sep = "|----------|----|--------|--------|------|------|------|"
+    if has_retries:
+        sep += "----|"
+    sep += "--------|-------|--------|----------|-------|-----|-----|--------|"
     lines.append(header)
     lines.append(sep)
     for r in results:
         pg = str(r["pages"] or "?")
-        lines.append(
-            f"| {r['paper_id']} | {pg} | {r['layout_q']} | {r['deepseek_out']} | "
-            f"{r['questions_passed']} | {r['questions_warning']} | {r['questions_failed']} | "
-            f"{r['raw_assets']} | {r['qa_links']} | {r['crop_success']} | {r['crop_failed']} | "
-            f"{r['phash_success']} | {r['duplicate_candidates']} | {r['visual_candidates']} | "
-            f"{r['status']} |"
-        )
+        row = (f"| {r['paper_id']} | {pg} | {r['layout_q']} | {r['deepseek_out']} | "
+               f"{r['questions_passed']} | {r['questions_warning']} | {r['questions_failed']} | ")
+        if has_retries:
+            row += f"{r.get('retry_count', 0)} | "
+        row += (f"{r['raw_assets']} | {r['qa_links']} | {r['crop_success']} | {r['crop_failed']} | "
+                f"{r['phash_success']} | {r['duplicate_candidates']} | {r['visual_candidates']} | "
+                f"{r['status']} |")
+        lines.append(row)
     lines.append("")
 
     # Quality warning distribution
@@ -404,6 +457,18 @@ def _generate_markdown_report(results: list[dict], elapsed: float) -> str:
         lines.append("|----------|-------|")
         for r in pipeline_errors:
             lines.append(f"| {r['paper_id']} | {r['error'][:200]} |")
+        lines.append("")
+
+    # Retry history (ADR 021)
+    retried = [r for r in results if r.get("retry_count", 0) > 0]
+    if retried:
+        lines.append("## Retry History")
+        lines.append("")
+        lines.append("| Paper ID | Final Status | Reruns | Previous Error |")
+        lines.append("|----------|-------------|--------|----------------|")
+        for r in retried:
+            prev = (r.get("previous_error") or "unknown")[:120]
+            lines.append(f"| {r['paper_id']} | {r['status']} | {r.get('retry_count', 0)} | {prev} |")
         lines.append("")
 
     # Conclusion
@@ -662,6 +727,8 @@ def _generate_json_summary(results: list[dict], elapsed: float) -> dict:
                 "duplicate_candidates": r["duplicate_candidates"],
                 "visual_candidates": r["visual_candidates"],
                 "elapsed_s": r["elapsed_s"],
+                "retry_count": r.get("retry_count", 0),
+                "previous_error": r.get("previous_error"),
                 "error": r["error"][:200] if r["error"] else None,
             }
             for r in results
@@ -684,6 +751,252 @@ def _print_progress(n: int, total: int, paper_id: str, elapsed: float) -> None:
 
 
 # ---------------------------------------------------------------------------
+# ADR 021: Summarize from existing run-report.json files
+# ---------------------------------------------------------------------------
+
+
+def _summarize_from_existing(
+    work_root: Path,
+    pdf_paths: list[Path],
+    prefix: str,
+    repository,
+) -> list[dict]:
+    """ADR 021: recompute results from existing run-report.json files.
+
+    Does NOT re-run ingestion. Reads run-report.json from each work_dir
+    and queries the DB for asset link integrity.
+    """
+    results: list[dict] = []
+    for i, pdf_path in enumerate(pdf_paths):
+        n = i + 1
+        paper_id = f"{prefix}_{n:04d}"
+        work_dir = work_root / paper_id
+        report_path = work_dir / "run-report.json"
+
+        if not report_path.exists():
+            results.append({
+                "paper_id": paper_id,
+                "pdf_path": str(pdf_path),
+                "work_dir": str(work_dir),
+                "status": "missing_report",
+                "pages": None,
+                "layout_q": 0,
+                "deepseek_out": 0,
+                "questions_passed": 0,
+                "questions_warning": 0,
+                "questions_failed": 0,
+                "failed_question_ids": [],
+                "quality_warning_counts": {},
+                "raw_assets": 0,
+                "qa_links": 0,
+                "unlinked_raw_assets": 0,
+                "links_without_question_block": 0,
+                "crop_success": 0,
+                "crop_failed": 0,
+                "phash_success": 0,
+                "duplicate_candidates": 0,
+                "visual_candidates": 0,
+                "elapsed_s": 0,
+                "retry_count": 0,
+                "previous_error": None,
+                "error": "run-report.json not found",
+            })
+            continue
+
+        try:
+            report_data = json.loads(report_path.read_text(encoding="utf-8"))
+            status = report_data.get("status", "unknown")
+            steps_map: dict[str, dict] = {}
+            for s in report_data.get("steps", []):
+                steps_map[s.get("name", "")] = s
+
+            layout_q = steps_map.get("layout_ownership", {}).get("output_count", 0)
+            deepseek_out = steps_map.get("deepseek_structure", {}).get("output_count", 0)
+            raw_assets_count = steps_map.get("identify_assets", {}).get("output_count", 0)
+            crop_data = steps_map.get("crop_assets", {})
+            crop_success = crop_data.get("output_count", 0)
+            crop_warnings = crop_data.get("warnings", [])
+            crop_failed = len(crop_warnings)
+            phash_success = steps_map.get("compute_phash", {}).get("output_count", 0)
+            dup_candidates = steps_map.get("duplicate_candidates", {}).get("output_count", 0)
+            vis_candidates = steps_map.get("visual_candidates", {}).get("output_count", 0)
+
+            # DB queries for asset link integrity
+            qa_links = -1
+            unlinked_raw_assets = -1
+            links_without_qb = -1
+            db_available = False
+            if repository is not None:
+                try:
+                    cursor = repository.connection.cursor()
+                    cursor.execute(
+                        """SELECT COUNT(*)
+                           FROM question_asset_links qal
+                           JOIN raw_assets ra ON ra.id = qal.raw_asset_id
+                           WHERE ra.paper_id = %(paper_id)s""",
+                        {"paper_id": paper_id},
+                    )
+                    row = cursor.fetchone()
+                    qa_links = (row[0] if isinstance(row, tuple) else row.get("count", 0)) if row else 0
+
+                    cursor.execute(
+                        """SELECT COUNT(*)
+                           FROM raw_assets ra
+                           WHERE ra.paper_id = %(paper_id)s
+                             AND NOT EXISTS (
+                                 SELECT 1 FROM question_asset_links qal
+                                 WHERE qal.raw_asset_id = ra.id
+                             )""",
+                        {"paper_id": paper_id},
+                    )
+                    row = cursor.fetchone()
+                    unlinked_raw_assets = (row[0] if isinstance(row, tuple) else row.get("count", 0)) if row else 0
+
+                    cursor.execute(
+                        """SELECT COUNT(*)
+                           FROM question_asset_links qal
+                           JOIN raw_assets ra ON ra.id = qal.raw_asset_id
+                           LEFT JOIN question_blocks qb ON qb.id = qal.question_id
+                           WHERE ra.paper_id = %(paper_id)s AND qb.id IS NULL""",
+                        {"paper_id": paper_id},
+                    )
+                    row = cursor.fetchone()
+                    links_without_qb = (row[0] if isinstance(row, tuple) else row.get("count", 0)) if row else 0
+                    db_available = True
+                except Exception:
+                    pass
+
+            if not db_available:
+                raise RuntimeError(
+                    "Database unavailable for asset link queries — "
+                    "required by --summarize-existing"
+                )
+
+            # Retry tracking from previous report
+            prev_report_path = work_dir / "run-report.previous.json"
+            retry_count = 0
+            previous_error = None
+            if prev_report_path.exists():
+                retry_count = 1
+                try:
+                    prev_data = json.loads(prev_report_path.read_text(encoding="utf-8"))
+                    prev_status = prev_data.get("status", "unknown")
+                    if prev_status == "failed":
+                        prev_errors = prev_data.get("errors", [])
+                        previous_error = "; ".join(prev_errors[:3]) if prev_errors else "previous run failed"
+                    else:
+                        previous_error = f"previous status: {prev_status}"
+                except Exception:
+                    previous_error = "previous report unparseable"
+
+            # Page count from PDF
+            pages = count_pages(pdf_path)
+
+            # Elapsed time from report
+            started = report_data.get("started_at", "")
+            finished = report_data.get("finished_at", "")
+            elapsed_s = 0
+            try:
+                from datetime import datetime as dt
+                if started and finished:
+                    t0 = dt.fromisoformat(started)
+                    t1 = dt.fromisoformat(finished)
+                    elapsed_s = round((t1 - t0).total_seconds(), 1)
+            except Exception:
+                pass
+
+            results.append({
+                "paper_id": paper_id,
+                "pdf_path": str(pdf_path),
+                "work_dir": str(work_dir),
+                "status": status,
+                "pages": pages,
+                "layout_q": layout_q,
+                "deepseek_out": deepseek_out,
+                "questions_passed": report_data.get("questions_passed", 0),
+                "questions_warning": report_data.get("questions_warning", 0),
+                "questions_failed": report_data.get("questions_failed", 0),
+                "failed_question_ids": report_data.get("failed_question_ids", []),
+                "quality_warning_counts": report_data.get("quality_warning_counts", {}),
+                "raw_assets": raw_assets_count,
+                "qa_links": qa_links,
+                "unlinked_raw_assets": unlinked_raw_assets,
+                "links_without_question_block": links_without_qb,
+                "crop_success": crop_success,
+                "crop_failed": crop_failed,
+                "phash_success": phash_success,
+                "duplicate_candidates": dup_candidates,
+                "visual_candidates": vis_candidates,
+                "elapsed_s": elapsed_s,
+                "retry_count": retry_count,
+                "previous_error": previous_error,
+                "error": None if status != "failed" else (
+                    "; ".join(report_data.get("errors", [])[:3]) or "pipeline failed"
+                ),
+            })
+        except RuntimeError as exc:
+            if "Database unavailable" in str(exc):
+                raise
+            results.append({
+                "paper_id": paper_id,
+                "pdf_path": str(pdf_path),
+                "work_dir": str(work_dir),
+                "status": "error",
+                "pages": None,
+                "layout_q": 0,
+                "deepseek_out": 0,
+                "questions_passed": 0,
+                "questions_warning": 0,
+                "questions_failed": 0,
+                "failed_question_ids": [],
+                "quality_warning_counts": {},
+                "raw_assets": 0,
+                "qa_links": -1,
+                "unlinked_raw_assets": -1,
+                "links_without_question_block": -1,
+                "crop_success": 0,
+                "crop_failed": 0,
+                "phash_success": 0,
+                "duplicate_candidates": 0,
+                "visual_candidates": 0,
+                "elapsed_s": 0,
+                "retry_count": 0,
+                "previous_error": None,
+                "error": str(exc),
+            })
+        except Exception as exc:
+            results.append({
+                "paper_id": paper_id,
+                "pdf_path": str(pdf_path),
+                "work_dir": str(work_dir),
+                "status": "error",
+                "pages": None,
+                "layout_q": 0,
+                "deepseek_out": 0,
+                "questions_passed": 0,
+                "questions_warning": 0,
+                "questions_failed": 0,
+                "failed_question_ids": [],
+                "quality_warning_counts": {},
+                "raw_assets": 0,
+                "qa_links": -1,
+                "unlinked_raw_assets": -1,
+                "links_without_question_block": -1,
+                "crop_success": 0,
+                "crop_failed": 0,
+                "phash_success": 0,
+                "duplicate_candidates": 0,
+                "visual_candidates": 0,
+                "elapsed_s": 0,
+                "retry_count": 0,
+                "previous_error": None,
+                "error": str(exc),
+            })
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -691,6 +1004,15 @@ def _print_progress(n: int, total: int, paper_id: str, elapsed: float) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+
+    # ADR 021: --summarize-existing mode
+    if args.summarize_existing:
+        return _main_summarize_existing(args)
+
+    if not args.pdf_dir:
+        print("ERROR: --pdf-dir is required unless --summarize-existing is used.",
+              file=sys.stderr)
+        return 1
 
     pdf_dir = Path(args.pdf_dir)
     if not pdf_dir.is_dir():
@@ -701,6 +1023,24 @@ def main(argv: list[str] | None = None) -> int:
     if not pdf_files:
         print(f"ERROR: No PDF files found in {pdf_dir}", file=sys.stderr)
         return 1
+
+    # ADR 021: --only-index or --only-paper filtering
+    if args.only_index is not None:
+        idx = args.only_index - 1  # convert to 0-indexed
+        if 0 <= idx < len(pdf_files):
+            pdf_files = [pdf_files[idx]]
+        else:
+            print(f"ERROR: --only-index {args.only_index} out of range "
+                  f"(1-{len(pdf_files)})", file=sys.stderr)
+            return 1
+    elif args.only_paper:
+        matched = [p for p in pdf_files if args.only_paper in p.stem]
+        if matched:
+            pdf_files = matched
+        else:
+            print(f"ERROR: --only-paper '{args.only_paper}' matched no PDFs in {pdf_dir}",
+                  file=sys.stderr)
+            return 1
 
     if args.limit:
         pdf_files = pdf_files[:args.limit]
@@ -739,7 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
         psycopg.connect(psycopg_conninfo(settings.database_url))
     )
 
-    print(f"ADR 020 — Small-Scale Real Ingestion Beta")
+    print(f"ADR 020/021 — Small-Scale Real Ingestion Beta")
     print(f"PDFs: {len(pdf_files)} from {pdf_dir}")
     print(f"Resume: {args.resume}")
     print(f"Work root: {work_root}")
@@ -769,11 +1109,88 @@ def main(argv: list[str] | None = None) -> int:
         results.append(result)
 
     print()
-    total_elapsed = time.monotonic() - start_time
+    return _output_reports(results, work_root, args.report_dir, today)
+
+
+def _main_summarize_existing(args) -> int:
+    """ADR 021: --summarize-existing mode."""
+    if not args.work_root:
+        print("ERROR: --work-root is required with --summarize-existing",
+              file=sys.stderr)
+        return 1
+
+    work_root = Path(args.work_root)
+    if not work_root.is_dir():
+        print(f"ERROR: work root not found: {work_root}", file=sys.stderr)
+        return 1
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Discover paper dirs from work_root
+    paper_dirs = sorted(
+        d for d in work_root.iterdir()
+        if d.is_dir() and (d / "run-report.json").exists()
+    )
+
+    if args.only_index is not None:
+        idx = args.only_index - 1
+        if 0 <= idx < len(paper_dirs):
+            paper_dirs = [paper_dirs[idx]]
+        else:
+            print(f"ERROR: --only-index {args.only_index} out of range "
+                  f"(1-{len(paper_dirs)})", file=sys.stderr)
+            return 1
+    elif args.only_paper:
+        matched = [d for d in paper_dirs if args.only_paper in d.name]
+        if matched:
+            paper_dirs = matched
+        else:
+            print(f"ERROR: --only-paper '{args.only_paper}' matched no dirs",
+                  file=sys.stderr)
+            return 1
+
+    # Build synthetic pdf_paths (for page counting)
+    synthetic_paths = [d / "placeholder.pdf" for d in paper_dirs]
+
+    # DB connection
+    from question_bank.config import Settings, psycopg_conninfo
+    settings = Settings.load()
+
+    try:
+        import psycopg
+        from question_bank.repository import PostgresQuestionBankRepository
+    except ImportError:
+        print("ERROR: psycopg is required.", file=sys.stderr)
+        return 2
+
+    repository = PostgresQuestionBankRepository(
+        psycopg.connect(psycopg_conninfo(settings.database_url))
+    )
+
+    print(f"ADR 021 — Summarize Existing Run Reports")
+    print(f"Paper dirs: {len(paper_dirs)} from {work_root}")
+    print(f"Prefix: {args.paper_prefix}")
+    print()
+
+    results = _summarize_from_existing(
+        work_root, synthetic_paths, args.paper_prefix, repository,
+    )
+
+    return _output_reports(results, work_root, args.report_dir, today)
+
+
+def _output_reports(
+    results: list[dict],
+    work_root: Path,
+    report_dir: Path,
+    today: str,
+) -> int:
+    """Write markdown + JSON reports and print summary."""
+    total_elapsed = sum(r["elapsed_s"] for r in results)
 
     # Generate markdown report
     report_md = _generate_markdown_report(results, total_elapsed)
-    report_dir = Path(args.report_dir)
+    report_dir = Path(report_dir)
     report_dir.mkdir(parents=True, exist_ok=True)
     md_path = report_dir / f"real-e2e-beta-{today}.md"
     md_path.write_text(report_md, encoding="utf-8")

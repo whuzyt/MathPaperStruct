@@ -528,19 +528,23 @@ def _step_mineru_parse(
     started = _now_iso()
     work_path = Path(work_dir)
 
-    # Require both markdown AND elements JSON artifacts to skip MinerU.
+    # ADR 021: require BOTH markdown AND elements JSON artifacts to skip MinerU.
     # MinerU 3.x nests output in subdirectories (e.g. <pdf_name>/auto/),
     # so check by globbing rather than hardcoding flat paths.
+    # Additionally, validate artifacts are not corrupted (non-empty md,
+    # parseable json, at least 1 layout element).
     if resume:
         md_files = list(work_path.rglob("*.md"))
         json_files = _discover_mineru_json_files(work_path)
         if md_files and json_files:
-            ctx["mineru_result"] = MinerUResult(
-                output_dir=work_path,
-                markdown_path=md_files[0],
-                raw_json_path=json_files[0],
-            )
-            return _make_result("mineru_parse", "skipped", started)
+            valid = _validate_resume_artifacts(md_files[0], json_files[0])
+            if valid:
+                ctx["mineru_result"] = MinerUResult(
+                    output_dir=work_path,
+                    markdown_path=md_files[0],
+                    raw_json_path=json_files[0],
+                )
+                return _make_result("mineru_parse", "skipped", started)
 
     runner = LocalMinerURunner(command=mineru_command)
     result = runner.parse_pdf(Path(pdf_path), work_path)
@@ -548,6 +552,32 @@ def _step_mineru_parse(
     ok = 1 if (result.markdown_path and result.markdown_path.exists()) else 0
     return _make_result("mineru_parse", "success", started,
                         input_count=1, output_count=ok)
+
+
+def _validate_resume_artifacts(md_path: Path, json_path: Path) -> bool:
+    """ADR 021: validate that resume artifacts are not corrupted.
+
+    Returns True if artifacts are valid and can safely skip MinerU.
+    """
+    # Check 1: markdown is non-empty
+    try:
+        md_text = md_path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return False
+    if not md_text:
+        return False
+
+    # Check 2: json is parseable
+    try:
+        raw_elements = _load_layout_elements(json_path)
+    except Exception:
+        return False
+
+    # Check 3: at least 1 layout element
+    if not raw_elements:
+        return False
+
+    return True
 
 
 # ---------------------------------------------------------------------------

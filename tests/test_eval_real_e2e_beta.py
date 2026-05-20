@@ -1,4 +1,4 @@
-"""Tests for ADR 020: Small-Scale Real Ingestion Beta evaluation tool."""
+"""Tests for ADR 020/021: Small-Scale Real Ingestion Beta evaluation tool."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from tools.eval_real_e2e_beta import (
     _process_one_pdf,
     _process_one_safe,
     _report_error_summary,
+    _summarize_from_existing,
 )
 
 
@@ -48,6 +49,8 @@ def _result(**kwargs) -> dict:
         "duplicate_candidates": 3,
         "visual_candidates": 1,
         "elapsed_s": 45.5,
+        "retry_count": 0,
+        "previous_error": None,
         "error": None,
     }
     defaults.update(kwargs)
@@ -680,6 +683,293 @@ class TestFailureIsolation(unittest.TestCase):
 
         self.assertEqual(result["crop_success"], 2)
         self.assertEqual(result["crop_failed"], 2)
+
+
+# ---------------------------------------------------------------------------
+# ADR 021: Argument parsing additions
+# ---------------------------------------------------------------------------
+
+
+class TestADR021ArgumentParsing(unittest.TestCase):
+    """ADR 021: new CLI flags."""
+
+    def setUp(self):
+        self.parser = _build_parser()
+
+    def test_summarize_existing_flag(self):
+        args = self.parser.parse_args(["--summarize-existing", "--work-root", "/tmp/runs"])
+        self.assertTrue(args.summarize_existing)
+
+    def test_summarize_existing_default_false(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs"])
+        self.assertFalse(args.summarize_existing)
+
+    def test_only_index_flag(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs", "--only-index", "12"])
+        self.assertEqual(args.only_index, 12)
+
+    def test_only_index_default_none(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs"])
+        self.assertIsNone(args.only_index)
+
+    def test_only_paper_flag(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs", "--only-paper", "paper_0012"])
+        self.assertEqual(args.only_paper, "paper_0012")
+
+    def test_only_paper_default_none(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs"])
+        self.assertIsNone(args.only_paper)
+
+    def test_pdf_dir_not_required_with_summarize_existing(self):
+        """--pdf-dir should not be required when --summarize-existing is used."""
+        args = self.parser.parse_args(["--summarize-existing", "--work-root", "/tmp/runs"])
+        self.assertIsNone(args.pdf_dir)
+
+    def test_pdf_dir_required_without_summarize_existing(self):
+        with self.assertRaises(SystemExit):
+            self.parser.parse_args([])
+
+
+# ---------------------------------------------------------------------------
+# ADR 021: Retry tracking in reports
+# ---------------------------------------------------------------------------
+
+
+class TestRetryTracking(unittest.TestCase):
+    """ADR 021: retry history and tracking in markdown reports."""
+
+    def test_retry_history_section_when_retries_exist(self):
+        results = [
+            _result(),
+            _result(paper_id="beta_0002", retry_count=1,
+                    previous_error="MinerU connection failed"),
+        ]
+        md = _generate_markdown_report(results, 120.0)
+        self.assertIn("## Retry History", md)
+        self.assertIn("beta_0002", md)
+        self.assertIn("| 1 |", md)  # rerun count
+        self.assertIn("MinerU connection failed", md)
+
+    def test_no_retry_history_section_when_no_retries(self):
+        results = [_result(), _result(paper_id="beta_0002")]
+        md = _generate_markdown_report(results, 120.0)
+        self.assertNotIn("## Retry History", md)
+
+    def test_retry_column_in_per_paper_table(self):
+        results = [
+            _result(),
+            _result(paper_id="beta_0002", retry_count=1,
+                    previous_error="connection error"),
+        ]
+        md = _generate_markdown_report(results, 120.0)
+        self.assertIn("Rtry", md)
+
+    def test_no_retry_column_when_no_retries(self):
+        results = [_result(), _result(paper_id="beta_0002")]
+        md = _generate_markdown_report(results, 120.0)
+        self.assertNotIn("Rtry", md)
+
+    def test_final_status_shows_completed_after_retry(self):
+        """A paper that was retried and succeeded shows completed status."""
+        results = [
+            _result(paper_id="beta_0002", retry_count=1,
+                    previous_error="MinerU connection failed",
+                    status="completed"),
+        ]
+        md = _generate_markdown_report(results, 120.0)
+        self.assertIn("completed", md)
+        self.assertIn("| 1 |", md)  # retry count
+
+    def test_retry_count_tracked_in_json_summary(self):
+        results = [_result(paper_id="beta_0002", retry_count=1,
+                          previous_error="MinerU error")]
+        summary = _generate_json_summary(results, 120.0)
+        paper = summary["papers"][0]
+        self.assertEqual(paper.get("retry_count", 0), 1)
+        self.assertIsNotNone(paper.get("previous_error"))
+
+
+# ---------------------------------------------------------------------------
+# ADR 021: Summarize-existing mode
+# ---------------------------------------------------------------------------
+
+
+class TestSummarizeExisting(unittest.TestCase):
+    """ADR 021: --summarize-existing functionality."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        if self.tmpdir.exists():
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _write_run_report(self, paper_id: str, **overrides) -> Path:
+        """Write a minimal run-report.json for a paper."""
+        work_dir = self.tmpdir / paper_id
+        work_dir.mkdir(parents=True, exist_ok=True)
+        report_data = {
+            "paper_id": paper_id,
+            "status": "completed",
+            "started_at": "2026-05-20T00:00:00+00:00",
+            "finished_at": "2026-05-20T00:01:00+00:00",
+            "steps": [
+                {"name": "layout_ownership", "status": "success", "output_count": 21},
+                {"name": "deepseek_structure", "status": "success", "output_count": 21},
+                {"name": "identify_assets", "status": "success", "output_count": 3},
+                {"name": "crop_assets", "status": "success", "output_count": 3, "warnings": []},
+                {"name": "compute_phash", "status": "success", "output_count": 3},
+                {"name": "duplicate_candidates", "status": "success", "output_count": 5},
+                {"name": "visual_candidates", "status": "success", "output_count": 2},
+            ],
+            "counts": {},
+            "warnings": [],
+            "errors": [],
+            "questions_passed": 20,
+            "questions_warning": 1,
+            "questions_failed": 0,
+            "failed_question_ids": [],
+            "quality_warning_counts": {"too_few_choices": 1},
+        }
+        report_data.update(overrides)
+        report_path = work_dir / "run-report.json"
+        report_path.write_text(json.dumps(report_data))
+        return report_path
+
+    def test_summarize_reads_existing_reports(self):
+        """_summarize_from_existing reads run-report.json without calling ingest."""
+        self._write_run_report("beta_0001")
+        self._write_run_report("beta_0002")
+
+        repo = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(3,), (0,), (0,), (3,), (0,), (0,)]
+        repo.connection.cursor.return_value = cursor
+
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf",
+                     self.tmpdir / "beta_0002" / "placeholder.pdf"]
+
+        results = _summarize_from_existing(
+            self.tmpdir, pdf_paths, "beta", repo,
+        )
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0]["paper_id"], "beta_0001")
+        self.assertEqual(results[0]["status"], "completed")
+        self.assertEqual(results[0]["questions_passed"], 20)
+        self.assertEqual(results[0]["raw_assets"], 3)
+        self.assertEqual(results[0]["crop_success"], 3)
+        self.assertEqual(results[0]["qa_links"], 3)
+
+    def test_summarize_missing_report_returns_error(self):
+        """A missing run-report.json produces an error entry."""
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+        (self.tmpdir / "beta_0001").mkdir(parents=True, exist_ok=True)
+
+        repo = mock.Mock()
+        results = _summarize_from_existing(
+            self.tmpdir, pdf_paths, "beta", repo,
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["status"], "missing_report")
+        self.assertIn("not found", results[0]["error"])
+
+    def test_summarize_db_unavailable_raises(self):
+        """If DB is unavailable, _summarize_from_existing raises RuntimeError."""
+        self._write_run_report("beta_0001")
+
+        # repo is None → DB unavailable
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _summarize_from_existing(self.tmpdir, pdf_paths, "beta", None)
+        self.assertIn("Database unavailable", str(ctx.exception))
+
+    def test_summarize_handles_db_query_failure(self):
+        """When DB queries fail for a specific paper, raise RuntimeError."""
+        self._write_run_report("beta_0001")
+
+        repo = mock.Mock()
+        cursor = mock.Mock()
+        cursor.execute.side_effect = RuntimeError("DB connection dropped")
+        repo.connection.cursor.return_value = cursor
+
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+
+        with self.assertRaises(RuntimeError) as ctx:
+            _summarize_from_existing(self.tmpdir, pdf_paths, "beta", repo)
+        self.assertIn("Database unavailable", str(ctx.exception))
+
+    def test_summarize_tracks_retry_from_previous_report(self):
+        """If run-report.previous.json exists, retry_count is set."""
+        self._write_run_report("beta_0001")
+        prev_path = self.tmpdir / "beta_0001" / "run-report.previous.json"
+        prev_path.write_text(json.dumps({
+            "status": "failed",
+            "errors": ["MinerU connection refused"],
+        }))
+
+        repo = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(3,), (0,), (0,)]
+        repo.connection.cursor.return_value = cursor
+
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+
+        results = _summarize_from_existing(
+            self.tmpdir, pdf_paths, "beta", repo,
+        )
+
+        self.assertEqual(results[0]["retry_count"], 1)
+        self.assertIn("MinerU", results[0]["previous_error"])
+
+    def test_summarize_extracts_crop_failed_from_warnings(self):
+        """crop_failed is computed from crop_assets warnings."""
+        self._write_run_report("beta_0001", steps=[
+            {"name": "layout_ownership", "status": "success", "output_count": 21},
+            {"name": "deepseek_structure", "status": "success", "output_count": 21},
+            {"name": "identify_assets", "status": "success", "output_count": 5},
+            {"name": "crop_assets", "status": "warning", "output_count": 3,
+             "warnings": ["img1: bad bbox", "img2: pdf error"]},
+            {"name": "compute_phash", "status": "success", "output_count": 3},
+            {"name": "duplicate_candidates", "status": "success", "output_count": 5},
+            {"name": "visual_candidates", "status": "success", "output_count": 2},
+        ])
+
+        repo = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(3,), (0,), (0,)]
+        repo.connection.cursor.return_value = cursor
+
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+
+        results = _summarize_from_existing(
+            self.tmpdir, pdf_paths, "beta", repo,
+        )
+
+        self.assertEqual(results[0]["crop_success"], 3)
+        self.assertEqual(results[0]["crop_failed"], 2)
+
+    def test_summarize_failed_paper_has_error_field(self):
+        """Failed papers get error field from report errors."""
+        self._write_run_report("beta_0001", status="failed",
+                              errors=["mineru_parse: MinerU crashed"])
+
+        repo = mock.Mock()
+        cursor = mock.Mock()
+        cursor.fetchone.side_effect = [(0,), (0,), (0,)]
+        repo.connection.cursor.return_value = cursor
+
+        pdf_paths = [self.tmpdir / "beta_0001" / "placeholder.pdf"]
+
+        results = _summarize_from_existing(
+            self.tmpdir, pdf_paths, "beta", repo,
+        )
+
+        self.assertEqual(results[0]["status"], "failed")
+        self.assertIn("MinerU crashed", results[0]["error"])
 
 
 if __name__ == "__main__":
