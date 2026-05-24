@@ -119,6 +119,63 @@ class TestAnswerNormalization(unittest.TestCase):
         _harden_question(q, _block(), payload)
         self.assertTrue(any("answer_normalized" in w for w in payload.get("warnings", [])))
 
+    def test_guxuan_answer_label_extracted_from_explanation(self):
+        """A polluted answer like 'B ... 故选：B' should normalize to label."""
+        q = _question(
+            choices=[_choice("A", "x=1"), _choice("B", "x=2")],
+            answer_latex="B\n【解析】代入可知成立，故选： B",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+        self.assertEqual(q.answer_latex, "B")
+        self.assertTrue(any("answer_normalized" in w for w in payload.get("warnings", [])))
+
+    def test_answer_prefix_label_extracted(self):
+        """答案：C should normalize to C."""
+        q = _question(
+            choices=[_choice("A", "x=1"), _choice("C", "x=3")],
+            answer_latex="答案：C",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+        self.assertEqual(q.answer_latex, "C")
+
+    def test_leading_label_with_explanation_extracted(self):
+        """A leading option label followed by explanation should normalize."""
+        q = _question(
+            choices=[_choice("A", "x=1"), _choice("D", "x=4")],
+            answer_latex="D．因为函数单调递增",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+        self.assertEqual(q.answer_latex, "D")
+
+    def test_long_question_payload_without_label_is_cleared(self):
+        """Whole-question markdown in answer_latex should be cleared, not saved."""
+        q = _question(
+            choices=[
+                _choice("A", "$x=1$"),
+                _choice("B", "$x=2$"),
+                _choice("C", "$x=3$"),
+                _choice("D", "$x=4$"),
+            ],
+            answer_latex="下列等式恒成立的是( )\nA．$x=1$\nB．$x=2$\nC．$x=3$\nD．$x=4$\n![](img.png)",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+        self.assertEqual(q.answer_latex, "")
+        self.assertTrue(any("answer_cleared_non_answer" in w for w in payload.get("warnings", [])))
+
+    def test_instruction_payload_without_label_is_cleared(self):
+        """Section/instruction text in answer_latex should be cleared."""
+        q = _question(
+            choices=[_choice("A", "x=1"), _choice("B", "x=2")],
+            answer_latex="本卷共11小题，共105分\n二、填空题：本题共3小题",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+        self.assertEqual(q.answer_latex, "")
+
 
 # ---------------------------------------------------------------------------
 # TestChoicePadding
@@ -346,6 +403,23 @@ class TestHardeningIntegration(unittest.TestCase):
         result = gate_question(q)
         self.assertNotIn("answer_not_in_choices", result.warning_codes)
         self.assertEqual(result.gate, "pass")
+
+    def test_cleared_non_answer_payload_does_not_warn_not_in_choices(self):
+        """Cleared polluted answer payload should not trip answer_not_in_choices."""
+        from question_bank.services.quality import gate_question
+
+        q = _question(
+            question_type="single_choice",
+            stem_latex="已知 $x=1$",
+            choices=[_choice("A", "$x=1$"), _choice("B", "$x=2$")],
+            answer_latex="本卷共11小题，共105分\n二、填空题：本题共3小题",
+        )
+        payload: dict = {}
+        _harden_question(q, _block(), payload)
+
+        result = gate_question(q)
+        self.assertEqual(q.answer_latex, "")
+        self.assertNotIn("answer_not_in_choices", result.warning_codes)
 
     def test_hardened_too_few_choices_passes_gating(self):
         """After choice padding, too_few_choices should not fire."""

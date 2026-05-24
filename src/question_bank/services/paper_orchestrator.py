@@ -8,6 +8,7 @@ strategy, resume, and report generation.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -626,6 +627,53 @@ def _step_layout_ownership(
 # ---------------------------------------------------------------------------
 
 
+ANSWER_LABEL_PATTERN = re.compile(
+    r"(?:答案|正确答案|故选|故答案为|选)\s*[:：]?\s*([A-H])(?=$|[^A-Za-z])",
+    re.IGNORECASE,
+)
+LEADING_ANSWER_LABEL_PATTERN = re.compile(
+    r"^\s*([A-H])\s*(?:[.．、。\n]|$)",
+    re.IGNORECASE,
+)
+CHOICE_MARKER_PATTERN = re.compile(r"(?:^|\n)\s*[A-H]\s*[.．、]")
+NON_ANSWER_PAYLOAD_CUES = (
+    "本卷共",
+    "试卷共",
+    "答题前",
+    "一、选择题",
+    "二、填空题",
+    "三、解答题",
+    "<details",
+    "<summary",
+    "![](",
+)
+
+
+def _extract_answer_label(answer: str, choice_labels: set[str]) -> str | None:
+    """Extract a reliable selected label from polluted answer text."""
+    for pattern in (ANSWER_LABEL_PATTERN, LEADING_ANSWER_LABEL_PATTERN):
+        match = pattern.search(answer)
+        if match:
+            label = match.group(1).upper()
+            if label in choice_labels:
+                return label
+    return None
+
+
+def _looks_like_non_answer_payload(answer: str, qb: QuestionBlock) -> bool:
+    """Detect whole-question/instruction payloads mistakenly placed in answer_latex."""
+    text = answer.strip()
+    if not text:
+        return False
+    if any(cue in text for cue in NON_ANSWER_PAYLOAD_CUES):
+        return True
+    if len(CHOICE_MARKER_PATTERN.findall(text)) >= 3:
+        return True
+    if len(text) >= 80 and qb.raw_markdown and text[:80] in qb.raw_markdown:
+        return True
+    return False
+
+
 def _harden_question(
     question: Question,
     qb: QuestionBlock,
@@ -657,17 +705,31 @@ def _harden_question(
         answer_upper = answer.upper()
         if answer and answer_upper not in choice_labels:
             matched = False
-            for c in question.choices:
-                content_upper = c.content_latex.strip().upper()
-                if content_upper and (
-                    answer_upper in content_upper or content_upper in answer_upper
-                ):
-                    question.answer_latex = c.label
-                    payload.setdefault("warnings", []).append(
-                        f"answer_normalized: '{answer[:60]}' -> {c.label}"
-                    )
-                    matched = True
-                    break
+            extracted_label = _extract_answer_label(answer, choice_labels)
+            if extracted_label:
+                question.answer_latex = extracted_label
+                payload.setdefault("warnings", []).append(
+                    f"answer_normalized: '{answer[:60]}' -> {extracted_label}"
+                )
+                matched = True
+            elif _looks_like_non_answer_payload(answer, qb):
+                question.answer_latex = ""
+                payload.setdefault("warnings", []).append(
+                    f"answer_cleared_non_answer: '{answer[:60]}'"
+                )
+                matched = True
+            else:
+                for c in question.choices:
+                    content_upper = c.content_latex.strip().upper()
+                    if content_upper and (
+                        answer_upper in content_upper or content_upper in answer_upper
+                    ):
+                        question.answer_latex = c.label
+                        payload.setdefault("warnings", []).append(
+                            f"answer_normalized: '{answer[:60]}' -> {c.label}"
+                        )
+                        matched = True
+                        break
             # If still no match but answer is a single letter, try case-insensitive
             if not matched and len(answer_upper) == 1 and answer_upper in set("ABCDEFGH"):
                 question.answer_latex = answer_upper
