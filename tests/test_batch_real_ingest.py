@@ -12,14 +12,18 @@ from unittest import mock
 from tools.batch_real_ingest import (
     _build_parser,
     _classify_failure,
+    _ensure_writable_dir,
     _extract_step_timings,
     _generate_json_summary,
     _generate_markdown_report,
     _init_manifest,
     _load_manifest,
+    _open_checked_database_connection,
     _save_manifest,
     _split_manifest_paper_id,
     _update_manifest_entry,
+    _validate_deepseek_api_key,
+    _validate_mineru_command,
 )
 
 
@@ -600,6 +604,122 @@ class TestFailureTaxonomy(unittest.TestCase):
 
     def test_none_error_is_unknown(self):
         self.assertEqual(_classify_failure(None), "unknown")
+
+
+# ---------------------------------------------------------------------------
+# TestPreflightGate
+# ---------------------------------------------------------------------------
+
+
+class FakeSettings:
+    database_url = "postgresql+psycopg://u:p@localhost:5432/db"
+
+
+class FakeDBCursor:
+    def __init__(self, missing_tables=None):
+        self.missing_tables = set(missing_tables or [])
+        self.last_query = ""
+        self.last_params = None
+
+    def execute(self, query, params=None):
+        self.last_query = query
+        self.last_params = params
+
+    def fetchone(self):
+        if "SELECT 1" in self.last_query:
+            return (1,)
+        if "to_regclass" in self.last_query:
+            table = self.last_params[0].split(".")[-1]
+            if table in self.missing_tables:
+                return (None,)
+            return (self.last_params[0],)
+        return None
+
+
+class FakeDBConnection:
+    def __init__(self, missing_tables=None):
+        self.cursor_obj = FakeDBCursor(missing_tables)
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def close(self):
+        self.closed = True
+
+
+class FakePsycopgModule:
+    def __init__(self, connection=None, error=None):
+        self.connection = connection or FakeDBConnection()
+        self.error = error
+        self.conninfo = None
+
+    def connect(self, conninfo):
+        self.conninfo = conninfo
+        if self.error:
+            raise self.error
+        return self.connection
+
+
+class TestPreflightGate(unittest.TestCase):
+    """ADR 023: production batch preflight checks."""
+
+    def setUp(self):
+        self.tmpdir = Path(tempfile.mkdtemp())
+
+    def tearDown(self):
+        import shutil
+        if self.tmpdir.exists():
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_validate_deepseek_api_key_accepts_sk_prefix(self):
+        self.assertIsNone(_validate_deepseek_api_key("sk-test-123456"))
+
+    def test_validate_deepseek_api_key_rejects_blank(self):
+        err = _validate_deepseek_api_key("   ")
+        self.assertIn("DEEPSEEK_API_KEY not configured", err)
+
+    def test_validate_deepseek_api_key_rejects_placeholder(self):
+        err = _validate_deepseek_api_key("sk-...")
+        self.assertIn("looks like a placeholder", err)
+
+    def test_validate_deepseek_api_key_rejects_wrong_prefix(self):
+        err = _validate_deepseek_api_key("abc123")
+        self.assertIn("must start with sk-", err)
+
+    def test_validate_mineru_command_accepts_existing_path(self):
+        mineru = self.tmpdir / "mineru"
+        mineru.write_text("#!/bin/sh\n")
+        self.assertIsNone(_validate_mineru_command(str(mineru)))
+
+    def test_validate_mineru_command_rejects_missing_path(self):
+        err = _validate_mineru_command(str(self.tmpdir / "missing-mineru"))
+        self.assertIn("MinerU command not found", err)
+
+    def test_ensure_writable_dir_creates_and_probes(self):
+        path = self.tmpdir / "nested" / "assets"
+        err = _ensure_writable_dir(path, "asset-dir")
+        self.assertIsNone(err)
+        self.assertTrue(path.is_dir())
+
+    def test_open_checked_database_connection_returns_connection(self):
+        conn = FakeDBConnection()
+        psycopg = FakePsycopgModule(conn)
+        result = _open_checked_database_connection(FakeSettings(), psycopg)
+        self.assertIs(result, conn)
+        self.assertIn("postgresql://", psycopg.conninfo)
+
+    def test_open_checked_database_connection_reports_connect_error(self):
+        psycopg = FakePsycopgModule(error=RuntimeError("connection refused"))
+        with self.assertRaisesRegex(RuntimeError, "PostgreSQL connection failed"):
+            _open_checked_database_connection(FakeSettings(), psycopg)
+
+    def test_open_checked_database_connection_reports_missing_schema(self):
+        conn = FakeDBConnection(missing_tables={"raw_assets"})
+        psycopg = FakePsycopgModule(conn)
+        with self.assertRaisesRegex(RuntimeError, "Database schema missing tables"):
+            _open_checked_database_connection(FakeSettings(), psycopg)
+        self.assertTrue(conn.closed)
 
 
 # ---------------------------------------------------------------------------

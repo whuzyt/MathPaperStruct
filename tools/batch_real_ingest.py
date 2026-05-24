@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import time
 from collections import Counter
@@ -33,6 +34,19 @@ from tools.eval_deepseek_structure import count_pages
 MANIFEST_STATUSES = frozenset({
     "pending", "running", "completed", "partial", "failed", "crashed",
 })
+
+REQUIRED_SCHEMA_TABLES = (
+    "papers",
+    "question_blocks",
+    "questions",
+    "choices",
+    "quality_reports",
+    "raw_assets",
+    "question_asset_links",
+    "duplicate_candidate_groups",
+    "canonical_questions",
+    "canonical_assets",
+)
 
 
 def _init_manifest(
@@ -98,6 +112,108 @@ def _split_manifest_paper_id(paper_id: str, fallback_prefix: str) -> tuple[str, 
     if sep and suffix.isdigit():
         return prefix, int(suffix)
     return fallback_prefix, 1
+
+
+# ---------------------------------------------------------------------------
+# ADR 023: production preflight gate
+# ---------------------------------------------------------------------------
+
+
+def _validate_deepseek_api_key(api_key: str | None) -> str | None:
+    """Return an error if the DeepSeek API key is absent or obviously invalid."""
+    if not api_key or not api_key.strip():
+        return "DEEPSEEK_API_KEY not configured. Set it in .env or environment."
+    key = api_key.strip()
+    if key in {"sk-...", "sk-test", "sk-xxx"}:
+        return "DEEPSEEK_API_KEY looks like a placeholder."
+    if not key.startswith("sk-"):
+        return "DEEPSEEK_API_KEY must start with sk-."
+    if len(key) < 8:
+        return "DEEPSEEK_API_KEY is too short."
+    return None
+
+
+def _validate_mineru_command(command: str) -> str | None:
+    """Return an error if the configured MinerU command cannot be resolved."""
+    if not command or not command.strip():
+        return "MinerU command is empty. Set MINERU_COMMAND or install mineru."
+
+    command = command.strip()
+    is_path_like = "/" in command or command.startswith(".")
+    if is_path_like:
+        if Path(command).exists():
+            return None
+        return (
+            f"MinerU command not found: {command}. "
+            "Set MINERU_COMMAND to the installed mineru executable."
+        )
+
+    if shutil.which(command):
+        return None
+    return (
+        f"MinerU command not found on PATH: {command}. "
+        "Install MinerU or set MINERU_COMMAND."
+    )
+
+
+def _ensure_writable_dir(path: Path, label: str) -> str | None:
+    """Create and probe a writable directory used by production batch output."""
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        probe = path / f".preflight_write_test_{os.getpid()}"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        return None
+    except Exception as exc:
+        return f"{label} is not writable: {path} ({exc})"
+
+
+def _missing_schema_tables(connection) -> list[str]:
+    """Return required DB tables absent from the configured PostgreSQL schema."""
+    cursor = connection.cursor()
+    missing: list[str] = []
+    for table in REQUIRED_SCHEMA_TABLES:
+        cursor.execute("SELECT to_regclass(%s)", (f"public.{table}",))
+        row = cursor.fetchone()
+        value = row[0] if isinstance(row, tuple) else (row.get("to_regclass") if row else None)
+        if value is None:
+            missing.append(table)
+    return missing
+
+
+def _open_checked_database_connection(settings, psycopg_module):
+    """Open PostgreSQL and verify minimal production schema before batch work."""
+    from question_bank.config import psycopg_conninfo
+
+    try:
+        connection = psycopg_module.connect(psycopg_conninfo(settings.database_url))
+    except Exception as exc:
+        raise RuntimeError(f"PostgreSQL connection failed: {exc}") from exc
+
+    try:
+        cursor = connection.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        missing = _missing_schema_tables(connection)
+    except Exception as exc:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        raise RuntimeError(f"PostgreSQL preflight query failed: {exc}") from exc
+
+    if missing:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        missing_text = ", ".join(missing)
+        raise RuntimeError(
+            "Database schema missing tables: "
+            f"{missing_text}. Run `PYTHONPATH=src python3 -m question_bank.cli db init`."
+        )
+
+    return connection
 
 
 # ---------------------------------------------------------------------------
@@ -788,18 +904,27 @@ def main(argv: list[str] | None = None) -> int:
         print("Nothing to process — all entries completed.")
         return 0
 
-    _save_manifest(manifest, work_root)
-
     # Lazy imports — require DB and DeepSeek
-    from question_bank.config import Settings, psycopg_conninfo
+    from question_bank.config import Settings
     from question_bank.services.deepseek import DeepSeekHTTPClient
 
     settings = Settings.load()
 
     api_key = settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY")
-    if not api_key:
-        print("ERROR: DEEPSEEK_API_KEY not configured.", file=sys.stderr)
-        print("Set DEEPSEEK_API_KEY in .env or environment.", file=sys.stderr)
+    preflight_errors = [
+        e for e in (
+            _validate_deepseek_api_key(api_key),
+            _validate_mineru_command(settings.mineru_command),
+            _ensure_writable_dir(work_root, "work-root"),
+            _ensure_writable_dir(args.asset_dir, "asset-dir"),
+            _ensure_writable_dir(args.report_dir, "report-dir"),
+        )
+        if e
+    ]
+    if preflight_errors:
+        print("ERROR: Production preflight failed.", file=sys.stderr)
+        for error in preflight_errors:
+            print(f"- {error}", file=sys.stderr)
         return 1
 
     deepseek_client = DeepSeekHTTPClient(
@@ -816,9 +941,18 @@ def main(argv: list[str] | None = None) -> int:
         print("Install project dependencies first.", file=sys.stderr)
         return 2
 
+    try:
+        connection = _open_checked_database_connection(settings, psycopg)
+    except RuntimeError as exc:
+        print("ERROR: Production preflight failed.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 2
+
     repository = PostgresQuestionBankRepository(
-        psycopg.connect(psycopg_conninfo(settings.database_url))
+        connection
     )
+
+    _save_manifest(manifest, work_root)
 
     print(f"ADR 022 — Production Batch Runner")
     print(f"PDFs to process: {total_to_run}")
