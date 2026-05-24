@@ -151,6 +151,14 @@ class TestArgumentParsing(unittest.TestCase):
         args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs", "--fail-fast"])
         self.assertTrue(args.fail_fast)
 
+    def test_preflight_only_default_false(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs"])
+        self.assertFalse(args.preflight_only)
+
+    def test_preflight_only_flag(self):
+        args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs", "--preflight-only"])
+        self.assertTrue(args.preflight_only)
+
     def test_asset_dir_default(self):
         args = self.parser.parse_args(["--pdf-dir", "/tmp/pdfs"])
         self.assertEqual(args.asset_dir, Path("data/assets"))

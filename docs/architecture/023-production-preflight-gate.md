@@ -55,6 +55,18 @@ filesystem writability, and database readiness. `batch-manifest.json` is not
 written until the preflight passes, so setup failures do not create misleading
 batch state.
 
+`--preflight-only` runs the same gate and exits without creating a manifest,
+constructing the DeepSeek client, or processing PDFs. This is the recommended
+operator command before a long production batch:
+
+```bash
+PYTHONPATH=src:. .venv/bin/python tools/batch_real_ingest.py \
+  --pdf-dir data/beta/pdf \
+  --work-root data/runs/batch_2026-05-24 \
+  --asset-dir data/assets \
+  --preflight-only
+```
+
 ## Consequences
 
 Production batch failures become easier to classify:
@@ -76,3 +88,4 @@ Unit tests cover:
 5. Successful PostgreSQL connection/schema check
 6. PostgreSQL connection failure
 7. Missing schema table failure
+8. `--preflight-only` argument parsing

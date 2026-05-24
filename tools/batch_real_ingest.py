@@ -8,6 +8,7 @@ Usage:
   python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --resume
   python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --only-index 12
   python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --fail-fast
+  python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --preflight-only
 """
 
 from __future__ import annotations
@@ -252,6 +253,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fail-fast", action="store_true",
         help="Stop on first failure instead of continuing")
+    parser.add_argument(
+        "--preflight-only", action="store_true",
+        help="Check production dependencies and schema, then exit without processing")
     parser.add_argument(
         "--report-dir", type=Path, default=Path("docs/eval"),
         help="Output directory for batch report (default: docs/eval)")
@@ -906,7 +910,6 @@ def main(argv: list[str] | None = None) -> int:
 
     # Lazy imports — require DB and DeepSeek
     from question_bank.config import Settings
-    from question_bank.services.deepseek import DeepSeekHTTPClient
 
     settings = Settings.load()
 
@@ -927,15 +930,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"- {error}", file=sys.stderr)
         return 1
 
-    deepseek_client = DeepSeekHTTPClient(
-        api_key=api_key,
-        base_url=settings.deepseek_base_url,
-        model=settings.deepseek_model,
-    )
-
     try:
         import psycopg
-        from question_bank.repository import PostgresQuestionBankRepository
     except ImportError:
         print("ERROR: psycopg is required (non-dry-run mode).", file=sys.stderr)
         print("Install project dependencies first.", file=sys.stderr)
@@ -947,6 +943,26 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: Production preflight failed.", file=sys.stderr)
         print(f"- {exc}", file=sys.stderr)
         return 2
+
+    if args.preflight_only:
+        try:
+            connection.close()
+        except Exception:
+            pass
+        print("Production preflight OK.")
+        print(f"PDFs selected: {total_to_run}")
+        print(f"Work root: {work_root}")
+        print("No manifest written; no PDFs processed.")
+        return 0
+
+    from question_bank.repository import PostgresQuestionBankRepository
+    from question_bank.services.deepseek import DeepSeekHTTPClient
+
+    deepseek_client = DeepSeekHTTPClient(
+        api_key=api_key,
+        base_url=settings.deepseek_base_url,
+        model=settings.deepseek_model,
+    )
 
     repository = PostgresQuestionBankRepository(
         connection
