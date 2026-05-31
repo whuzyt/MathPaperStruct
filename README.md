@@ -9,7 +9,7 @@ MinerU + DeepSeek backend skeleton for converting math exam PDFs into structured
 - Rule-based quality checks for common math-question-bank errors.
 - A DeepSeek adapter boundary with a fake client for local development and tests.
 - A MinerU runner interface placeholder.
-- A FastAPI app skeleton for health checks and structure previews.
+- A FastAPI web console for local run/evaluation visibility plus structure previews.
 
 ## Local Verification
 
@@ -55,6 +55,22 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
 uvicorn question_bank.api.app:create_app --factory --reload
+```
+
+Open the local console at:
+
+```text
+http://127.0.0.1:8000/
+```
+
+Useful endpoints:
+
+```text
+/                 Web console overview
+/ingest           Ingest command builder
+/api/health       Health check
+/api/runs         Recent data/runs/*/run-report.json summaries
+/api/evals        Recent docs/eval/*.md summaries
 ```
 
 ## Database
