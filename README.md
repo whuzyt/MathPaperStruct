@@ -73,6 +73,29 @@ Useful endpoints:
 /api/evals        Recent docs/eval/*.md summaries
 ```
 
+## Desktop GUI
+
+For non-technical use, start the desktop app:
+
+```bash
+./run_mathpaperstruct_gui.command
+```
+
+Or run the Python module directly:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m question_bank.gui.app
+```
+
+Or, after installing the package:
+
+```bash
+question-bank-gui
+```
+
+The GUI lets a user select one PDF, run MinerU + DeepSeek parsing, and export
+structured questions as JSON and Markdown under `data/gui_runs/<paper_id>/`.
+
 ## Database
 
 The first PostgreSQL schema lives in:
