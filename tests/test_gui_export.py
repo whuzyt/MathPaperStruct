@@ -8,6 +8,7 @@ from pathlib import Path
 from question_bank.domain.models import Choice, QualityReport, Question, QuestionAsset, QuestionBlock
 from question_bank.gui.export import export_questions, processing_result_to_dicts
 from question_bank.gui.runner import build_mineru_command, detect_mineru_command
+from question_bank.gui.settings import GuiSettings, load_gui_settings, save_gui_settings
 from question_bank.pipeline import ProcessingResult
 
 
@@ -127,6 +128,54 @@ class GuiRunnerConfigTest(unittest.TestCase):
             "-m",
             "auto",
         ])
+
+
+class GuiSettingsTest(unittest.TestCase):
+    def test_missing_settings_returns_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_gui_settings(Path(tmp) / "missing.json")
+
+            self.assertEqual(settings.deepseek_api_key, "")
+            self.assertIsNone(settings.use_real_deepseek)
+
+    def test_invalid_settings_returns_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gui_settings.json"
+            path.write_text("{bad json", encoding="utf-8")
+
+            settings = load_gui_settings(path)
+
+            self.assertEqual(settings.deepseek_api_key, "")
+            self.assertEqual(settings.output_dir, "")
+
+    def test_save_and_load_settings_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gui_settings.json"
+            original = GuiSettings(
+                output_dir="/tmp/gui_runs",
+                mineru_command="/tmp/mineru",
+                deepseek_api_key="sk-test",
+                deepseek_base_url="https://api.deepseek.com",
+                deepseek_model="deepseek-chat",
+                use_real_deepseek=True,
+                resume=False,
+            )
+
+            saved_path = save_gui_settings(original, path)
+            loaded = load_gui_settings(path)
+
+            self.assertEqual(saved_path, path)
+            self.assertEqual(loaded, original)
+
+    def test_non_dict_settings_returns_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "gui_settings.json"
+            path.write_text("[]", encoding="utf-8")
+
+            settings = load_gui_settings(path)
+
+            self.assertEqual(settings.deepseek_api_key, "")
+            self.assertIsNone(settings.resume)
 
 
 if __name__ == "__main__":

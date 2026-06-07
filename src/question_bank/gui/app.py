@@ -12,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from question_bank.config import Settings
 
 from .runner import GuiIngestOptions, default_options, detect_mineru_command, run_gui_ingest
+from .settings import GuiSettings, load_gui_settings, save_gui_settings
 
 
 class MathPaperStructApp(tk.Tk):
@@ -21,18 +22,33 @@ class MathPaperStructApp(tk.Tk):
         self.geometry("980x720")
         self.minsize(860, 620)
 
+        settings = Settings.load()
+        gui_settings = load_gui_settings()
         self.pdf_path = tk.StringVar()
         self.paper_id = tk.StringVar()
-        self.output_dir = tk.StringVar(value=str(Path("data/gui_runs").resolve()))
-        settings = Settings.load()
+        self.output_dir = tk.StringVar(value=gui_settings.output_dir or str(Path("data/gui_runs").resolve()))
         self.mineru_command = tk.StringVar(
-            value=detect_mineru_command(configured=settings.mineru_command)
+            value=detect_mineru_command(configured=gui_settings.mineru_command or settings.mineru_command)
         )
-        self.deepseek_api_key = tk.StringVar(value=os.environ.get("DEEPSEEK_API_KEY", ""))
-        self.deepseek_base_url = tk.StringVar(value=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
-        self.deepseek_model = tk.StringVar(value=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
-        self.use_real_deepseek = tk.BooleanVar(value=bool(self.deepseek_api_key.get()))
-        self.resume = tk.BooleanVar(value=True)
+        self.deepseek_api_key = tk.StringVar(
+            value=gui_settings.deepseek_api_key or os.environ.get("DEEPSEEK_API_KEY", "")
+        )
+        self.deepseek_base_url = tk.StringVar(
+            value=(
+                gui_settings.deepseek_base_url
+                or os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
+            )
+        )
+        self.deepseek_model = tk.StringVar(
+            value=gui_settings.deepseek_model or os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        )
+        use_real = (
+            gui_settings.use_real_deepseek
+            if gui_settings.use_real_deepseek is not None
+            else bool(self.deepseek_api_key.get())
+        )
+        self.use_real_deepseek = tk.BooleanVar(value=use_real)
+        self.resume = tk.BooleanVar(value=gui_settings.resume if gui_settings.resume is not None else True)
         self.status = tk.StringVar(value="请选择一个 PDF 开始。")
 
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
@@ -74,7 +90,7 @@ class MathPaperStructApp(tk.Tk):
         self._row_text(input_frame, 1, "Paper ID", self.paper_id)
         self._row_file(input_frame, 2, "输出目录", self.output_dir, self._choose_output_dir)
 
-        config_frame = ttk.LabelFrame(body, text="解析配置", padding=12)
+        config_frame = ttk.LabelFrame(body, text="解析设置", padding=12)
         config_frame.grid(row=1, column=0, sticky="nsew", pady=(12, 0), padx=(0, 8))
         config_frame.columnconfigure(1, weight=1)
         self._row_text(config_frame, 0, "MinerU 命令", self.mineru_command)
@@ -90,6 +106,11 @@ class MathPaperStructApp(tk.Tk):
             text="复用已有 MinerU 输出",
             variable=self.resume,
         ).grid(row=4, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(
+            config_frame,
+            text="保存设置",
+            command=self._save_settings,
+        ).grid(row=5, column=1, sticky="ew", pady=(10, 0))
 
         action_frame = ttk.LabelFrame(body, text="操作", padding=12)
         action_frame.grid(row=1, column=1, sticky="nsew", pady=(12, 0), padx=(8, 0))
@@ -179,6 +200,7 @@ class MathPaperStructApp(tk.Tk):
         except ValueError as exc:
             messagebox.showerror("无法开始", str(exc))
             return
+        self._save_settings(silent=True)
 
         self._running = True
         self.start_button.configure(state="disabled")
@@ -207,6 +229,30 @@ class MathPaperStructApp(tk.Tk):
             deepseek_api_key=self.deepseek_api_key.get().strip(),
             deepseek_base_url=self.deepseek_base_url.get().strip(),
             deepseek_model=self.deepseek_model.get().strip() or "deepseek-chat",
+            use_real_deepseek=self.use_real_deepseek.get(),
+            resume=self.resume.get(),
+        )
+
+    def _save_settings(self, *, silent: bool = False) -> None:
+        try:
+            path = save_gui_settings(self._current_settings())
+        except OSError as exc:
+            if not silent:
+                messagebox.showerror("保存失败", str(exc))
+            else:
+                self._append_log(f"设置保存失败：{exc}")
+            return
+        if not silent:
+            self._append_log(f"设置已保存：{path}")
+            messagebox.showinfo("设置已保存", f"设置已保存到：\n{path}")
+
+    def _current_settings(self) -> GuiSettings:
+        return GuiSettings(
+            output_dir=self.output_dir.get().strip(),
+            mineru_command=self.mineru_command.get().strip(),
+            deepseek_api_key=self.deepseek_api_key.get().strip(),
+            deepseek_base_url=self.deepseek_base_url.get().strip(),
+            deepseek_model=self.deepseek_model.get().strip(),
             use_real_deepseek=self.use_real_deepseek.get(),
             resume=self.resume.get(),
         )
