@@ -1,187 +1,154 @@
-# Question Bank Pipeline
+<p align="center">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&size=28&duration=3000&pause=500&color=3B82F6&center=true&vCenter=true&width=600&lines=Question+Bank+Pipeline;MinerU+%2B+DeepSeek+%E2%86%92+Structured+Math+Exam+Data" alt="Typing SVG" />
+</p>
 
-MinerU + DeepSeek backend skeleton for converting math exam PDFs into structured, reviewable question-bank data.
+<p align="center">
+  <a href="README.md"><img src="https://img.shields.io/badge/English-3B82F6?style=for-the-badge&logo=readme&logoColor=white" alt="English" /></a>
+  <a href="README.zh-CN.md"><img src="https://img.shields.io/badge/简体中文-EF4444?style=for-the-badge&logo=readme&logoColor=white" alt="简体中文" /></a>
+  <a href="README.ja.md"><img src="https://img.shields.io/badge/日本語-8B5CF6?style=for-the-badge&logo=readme&logoColor=white" alt="日本語" /></a>
+</p>
 
-## What This First Version Contains
+<p align="center">
+  <a href="https://github.com/chengxudong2025/question-bank-pipeline/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/Python-3.11+-blue?style=flat-square&logo=python&logoColor=white" alt="Python" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/tests-703%20passed-brightgreen?style=flat-square" alt="Tests" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/status-active-success?style=flat-square" alt="Status" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square&logo=github" alt="PRs Welcome" /></a>
+  <a href="#"><img src="https://img.shields.io/badge/DeepSeek-Powered-536DFE?style=flat-square&logo=openai&logoColor=white" alt="DeepSeek" /></a>
+</p>
 
-- Domain models for papers, question blocks, questions, choices, assets, and quality reports.
-- A deterministic question splitter for MinerU-style Markdown text.
-- Rule-based quality checks for common math-question-bank errors.
-- A DeepSeek adapter boundary with a fake client for local development and tests.
-- A MinerU runner interface placeholder.
-- A FastAPI web console for local run/evaluation visibility plus structure previews.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="rainbow" />
+</p>
 
-## Local Verification
+---
 
-The core tests use Python's standard `unittest`, so they can run before installing dev dependencies:
+# 📐 Question Bank Pipeline
 
-```bash
-PYTHONPATH=src python3 -m unittest discover -s tests -v
-```
+> **MinerU + DeepSeek backend** — convert math exam PDFs into structured, reviewable question-bank data with deterministic enrichment and quality gating.
 
-## Configuration
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-Copy `.env.example` to `.env` and set at least:
+## ✨ Highlights
 
-```bash
-DEEPSEEK_API_KEY=sk-...
-DEEPSEEK_BASE_URL=https://api.deepseek.com
-DEEPSEEK_MODEL=deepseek-chat
-MINERU_COMMAND=mineru
-```
+- 🧠 **PDF → Structured Questions** — MinerU parses layout; DeepSeek normalizes structure
+- ✅ **Deterministic Fallbacks** — Choice parsing, answer enrichment, type inference without model inference
+- 🔍 **Rule-Based Quality Gating** — 10+ checks for stems, choices, answers, LaTeX, analysis
+- 📊 **Production Observability** — Manifest-driven batch runner, step-level timing, failure taxonomy
+- 🖥️ **Web Console + Desktop GUI** — FastAPI dashboard and Tkinter desktop app
+- 🐘 **PostgreSQL + MinIO** — Production-grade persistence and object storage
+- 🔁 **Retry & Resume** — Automatic MinerU retry with exponential backoff, manifest-driven crash recovery
 
-The production client posts to DeepSeek's chat completions API and asks the model to return strict JSON for each question block. Tests use a fake transport and do not call the network.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-DeepSeek output is validated before it enters the pipeline. Required fields:
+## 📋 Table of Contents
+
+- [Architecture](#-architecture)
+- [Quick Start](#-quick-start)
+- [PDF Ingestion](#-pdf-ingestion)
+- [Question Splitting](#-question-splitting)
+- [Quality Checks](#-quality-checks)
+- [CLI Usage](#-cli-usage)
+- [Database](#-database)
+- [Desktop GUI](#-desktop-gui)
+- [Configuration](#-configuration)
+- [Development](#-development)
+- [License](#-license)
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## 🏗 Architecture
 
 ```text
-question_type, stem_latex, choices, answer_latex, analysis_latex,
-knowledge_points, difficulty, confidence, warnings
+┌──────────┐     ┌──────────────┐     ┌───────────────┐     ┌────────────┐
+│ PDF file │ ──► │ MinerU Parse │ ──► │ Question      │ ──► │ DeepSeek   │
+│          │     │ (layout)     │     │ Splitter      │     │ Structure  │
+└──────────┘     └──────────────┘     └───────────────┘     └────────────┘
+                                                                    │
+                                                                    ▼
+┌──────────┐     ┌──────────────┐     ┌───────────────┐     ┌────────────┐
+│ Review   │ ◄── │ Quality      │ ◄── │ Type          │ ◄── │ Enrichment │
+│ Queue    │     │ Gating       │     │ Inference     │     │ (choices,  │
+│          │     │              │     │               │     │  answers)  │
+└──────────┘     └──────────────┘     └───────────────┘     └────────────┘
 ```
 
-Important contract details:
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-- `question_type` must be one of `single_choice`, `multiple_choice`, `fill_blank`, `short_answer`, `proof`, `unknown`.
-- `choices` must be an array of `{label, content_latex}` objects.
-- `difficulty` must be `null` or an integer from 1 to 5.
-- `confidence` must include `structure`, `latex`, `answer`, and `knowledge`, each from 0 to 1.
-- `warnings` are persisted into `quality_reports.model_warnings` and force review.
-- Missing source answers or analyses must remain empty strings; the prompt explicitly forbids guessing.
+## 🚀 Quick Start
 
-To run the API after installing dependencies:
+### 1. Clone & Setup
 
 ```bash
+git clone https://github.com/chengxudong2025/question-bank-pipeline.git
+cd question-bank-pipeline
+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-uvicorn question_bank.api.app:create_app --factory --reload
 ```
 
-Open the local console at:
-
-```text
-http://127.0.0.1:8000/
-```
-
-Useful endpoints:
-
-```text
-/                 Web console overview
-/ingest           Ingest command builder
-/api/health       Health check
-/api/runs         Recent data/runs/*/run-report.json summaries
-/api/evals        Recent docs/eval/*.md summaries
-```
-
-## Desktop GUI
-
-For non-technical use, start the desktop app:
+### 2. Configure
 
 ```bash
-./run_mathpaperstruct_gui.command
+cp .env.example .env
+# Edit .env with your DeepSeek API key
 ```
 
-Or run the Python module directly:
-
-```bash
-PYTHONPATH=src .venv/bin/python -m question_bank.gui.app
-```
-
-Or, after installing the package:
-
-```bash
-question-bank-gui
-```
-
-The GUI lets a user select one PDF, run MinerU + DeepSeek parsing, and export
-structured questions as JSON and Markdown under `data/gui_runs/<paper_id>/`.
-
-## Database
-
-The first PostgreSQL schema lives in:
-
-```text
-db/001_initial_schema.sql
-```
-
-It creates the PRD core tables: `papers`, `parse_runs`, `question_blocks`, `questions`, `choices`, `question_assets`, and `quality_reports`.
-
-Start local infrastructure:
+### 3. Start Infrastructure
 
 ```bash
 docker compose up -d postgres minio
-```
-
-Initialize the database schema:
-
-```bash
 question-bank db init
 ```
 
-MinIO runs at:
+### 4. Run Tests
+
+```bash
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+# ✓ 703 tests passed
+```
+
+### 5. Ingest Your First PDF
+
+```bash
+question-bank ingest \
+  --paper-id paper_001 \
+  --pdf data/raw/paper_001.pdf \
+  --output-dir data/mineru/paper_001 \
+  --use-real-deepseek \
+  --save-db
+```
+
+### 6. Launch Web Console
+
+```bash
+uvicorn question_bank.api.app:create_app --factory --reload
+# Open http://127.0.0.1:8000/
+```
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## 📥 PDF Ingestion
+
+The `PDFIngestionService` connects the full production path:
 
 ```text
-API: http://localhost:9000
-Console: http://localhost:9001
-User: questionbank
-Password: questionbank123
-```
-
-Asset uploads use stable object keys:
-
-```text
-papers/{paper_id}/{question_id}/{filename}
-```
-
-Example:
-
-```python
-from pathlib import Path
-
-from question_bank.storage import LocalAssetUploader, MinIOObjectStorage, attach_uploaded_asset
-
-storage = MinIOObjectStorage(
-    endpoint="http://localhost:9000",
-    access_key="questionbank",
-    secret_key="questionbank123",
-    bucket="question-bank-assets",
-)
-uploader = LocalAssetUploader(storage=storage)
-uploaded = uploader.upload_question_asset(
-    paper_id="paper_001",
-    question_id="q_001",
-    file_path=Path("data/mineru/paper_001/images/figure.png"),
-    asset_type="geometry",
-    page=2,
-)
-attach_uploaded_asset(question, uploaded)
-```
-
-The repository layer accepts a DB-API style connection, so a psycopg connection can be passed in production:
-
-```python
-from question_bank.pipeline import ProcessingPipeline
-from question_bank.repository import PostgresQuestionBankRepository
-from question_bank.services.deepseek import DeepSeekHTTPClient
-
-deepseek = DeepSeekHTTPClient(api_key="sk-...")
-pipeline = ProcessingPipeline(deepseek_client=deepseek)
-repository = PostgresQuestionBankRepository(connection)
-
-result = pipeline.process_and_save_markdown("paper_001", mineru_markdown, repository)
-```
-
-## PDF Ingestion
-
-`PDFIngestionService` connects the first production path:
-
-```text
-PDF file -> MinerU output.md -> DeepSeek structure pass -> quality report -> repository save
+PDF file → MinerU output.md → DeepSeek structure → quality gating → PostgreSQL
 ```
 
 ```python
 from pathlib import Path
-
 from question_bank.ingestion import PDFIngestionService
 from question_bank.services.mineru import LocalMinerURunner
 
@@ -198,111 +165,225 @@ result = service.ingest_pdf(
 )
 ```
 
-## Question Splitting
+### Reliability Features (ADR 021)
 
-The first splitter is deterministic and review-friendly. It currently supports:
+| Feature | Description |
+|---------|-------------|
+| 🔁 Auto Retry | MinerU transient failures retried up to 2× with exponential backoff (30s, 90s) |
+| ✅ Resume Validation | Corrupt artifacts detected (empty md, unparseable JSON, zero elements) → auto re-run |
+| 📋 Manifest Recovery | `batch-manifest.json` survives crashes; resume skips completed papers |
+| ⏱ Step Timing | Per-step (MinerU, DeepSeek, crop…) aggregation for bottleneck analysis |
 
-- Arabic numbered questions such as `1.`, `2、`, and `第 6 题`.
-- Chinese section headings such as `一、选择题`, `二、填空题`, `三、解答`.
-- Option labels like `A.` and `B.` without treating them as new questions.
-- Stopping before answer sections such as `参考答案`, `答案`, `解析`, and `答案与解析`.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-Ambiguous blocks should still be reviewed or reprocessed by the DeepSeek validation path; the splitter is the cheap first pass, not the final authority.
+## ✂️ Question Splitting
 
-Answer sections are parsed separately by question number. When DeepSeek leaves `answer_latex` empty and a matching answer entry exists, the pipeline fills `answer_latex` from the parsed answer section before quality validation. This is deterministic enrichment, not model inference.
+Deterministic, review-friendly splitter with zero model inference:
 
-Answer entries with explicit labels are split before merge:
+| Feature | Support |
+|---------|---------|
+| Numbered questions | `1.`, `2、`, `第 6 题` |
+| Chinese section headings | `一、选择题`, `二、填空题`, `三、解答` |
+| Option labels | `A.`, `B.`, `C：`, `D．` (not treated as questions) |
+| Answer sections | `参考答案`, `答案`, `解析`, `答案与解析` |
+| Multi-line content | Preserved until next delimiter |
+
+Answer enrichment is **deterministic**, not model inference:
 
 ```text
 1. 答案：A 解析：代入可得。
+   ──► answer_latex = "A", analysis_latex = "代入可得。"
 ```
 
-becomes `answer_latex = "A"` and `analysis_latex = "代入可得。"` when those fields are not already supplied by DeepSeek. Entries that only start with `解：` or `解析：` are treated as analysis. Plain entries like `B` or `$x=1$` are treated as answers.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-Choice options are also parsed as a deterministic fallback. If DeepSeek returns no choices, the pipeline extracts option lines such as `A. ...`, `B、...`, `C：...`, and `D．...` from the raw question block. Multi-line option content is preserved until the next option label.
+## 🔍 Quality Checks
 
-Question type is inferred after deterministic enrichment and before quality validation. The fallback rules correct `unknown` or generic `short_answer` outputs using:
+| Rule | Triggers When |
+|------|--------------|
+| `empty_stem` | Stem is empty or whitespace-only |
+| `missing_answer` | No answer for choice/fill-blank/short-answer/proof |
+| `single_choice_too_few_choices` | Single choice has < 2 options |
+| `answer_not_in_choices` | Answer label not found in choice options |
+| `asset_without_text_reference` | Stem references figure but has no attached asset |
+| `no_analysis_for_proof` | Proof question missing analysis |
+| `no_analysis_for_short_answer` | Short answer missing analysis |
+| `unbalanced_latex_stem` | Mismatched `$` delimiters in stem |
+| `unbalanced_latex_answer` | Mismatched `$` delimiters in answer |
 
-- Parsed choices -> `single_choice`
-- Blank markers like `____`, `（ ）`, or section title `填空题` -> `fill_blank`
-- Section title or stem containing `证明` -> `proof`
-- Section titles like `解答`, `计算`, `应用`, `综合`, `压轴` -> `short_answer`
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-Specific model outputs such as `single_choice` are not overwritten.
-
-## Quality Checks
-
-Rule-based validation currently flags:
-
-- Empty stems.
-- Missing answers for choice, fill-blank, short-answer, and proof questions.
-- Single-choice questions with missing choices or fewer than 4 choices.
-- Single-choice answers that do not match any option label.
-- Stems that refer to a figure but have no attached asset.
-- Proof and short-answer questions without analysis.
-- Unbalanced LaTeX dollar delimiters in stem, answer, or analysis fields.
-
-## CLI
-
-After installing the package, use the `question-bank` command.
-
-Dry-run an existing MinerU Markdown artifact without a database or real DeepSeek call:
+## ⌨️ CLI Usage
 
 ```bash
-question-bank ingest \
-  --paper-id paper_001 \
-  --from-markdown data/mineru/paper_001/output.md \
-  --dry-run
-```
+# ── Ingestion ──────────────────────────────────────
+# Dry-run from existing MinerU markdown
+question-bank ingest --paper-id paper_001 \
+  --from-markdown data/mineru/paper_001/output.md --dry-run
 
-Run MinerU on a PDF, using the fake DeepSeek client and no database save:
+# Full pipeline: PDF → MinerU → DeepSeek → PostgreSQL
+question-bank ingest --paper-id paper_001 \
+  --pdf data/raw/paper_001.pdf --use-real-deepseek --save-db
 
-```bash
-question-bank ingest \
-  --paper-id paper_001 \
-  --pdf data/raw/paper_001.pdf \
-  --output-dir data/mineru/paper_001 \
-  --dry-run
-```
-
-Use real DeepSeek:
-
-```bash
-DEEPSEEK_API_KEY=sk-... question-bank ingest \
-  --paper-id paper_001 \
-  --from-markdown data/mineru/paper_001/output.md \
-  --use-real-deepseek \
-  --dry-run
-```
-
-Persist to PostgreSQL:
-
-```bash
-question-bank ingest \
-  --paper-id paper_001 \
-  --from-markdown data/mineru/paper_001/output.md \
-  --use-real-deepseek \
-  --save-db
-```
-
-List questions that need review:
-
-```bash
+# ── Review ─────────────────────────────────────────
+# List questions needing review
 question-bank review list --limit 50
+
+# View question details
+question-bank review show --question-id <id>
+
+# ── Assets ─────────────────────────────────────────
+# Compute perceptual hash for visual dedup
+question-bank review asset phash --paper-id paper_001
+
+# List visual duplicate candidates
+question-bank review asset visual-candidates --max-distance 8
+
+# ── Batch Production ───────────────────────────────
+# Process all PDFs in a directory
+python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --limit 100
+
+# Resume from crash
+python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --resume
+
+# Re-run a single failed paper
+python3 tools/batch_real_ingest.py --pdf-dir data/beta/pdf --only-index 12
 ```
 
-Each row includes question ID, type, quality score, rule error codes, model warnings, and a stem preview.
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
 
-## Architecture
+## 🗄 Database
 
-```text
-PDF upload
- -> MinerU parsing
- -> question block splitting
- -> DeepSeek structure normalization
- -> rule and semantic quality checks
- -> human review queue
- -> production question bank
+PostgreSQL with MinIO for object storage:
+
+```bash
+# Start infrastructure
+docker compose up -d postgres minio
+
+# Initialize schema
+question-bank db init
 ```
 
-See `docs/prd-mineru-deepseek-question-bank.md` for the product requirements.
+**MinIO Console**: http://localhost:9001  
+**User**: `questionbank` / **Password**: `questionbank123`
+
+```python
+from question_bank.repository import PostgresQuestionBankRepository
+from question_bank.storage import LocalAssetUploader, MinIOObjectStorage
+
+storage = MinIOObjectStorage(
+    endpoint="http://localhost:9000",
+    access_key="questionbank",
+    secret_key="questionbank123",
+    bucket="question-bank-assets",
+)
+
+uploader = LocalAssetUploader(storage=storage)
+uploaded = uploader.upload_question_asset(
+    paper_id="paper_001",
+    question_id="q_001",
+    file_path=Path("data/mineru/paper_001/images/figure.png"),
+    asset_type="geometry",
+    page=2,
+)
+```
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## 🖥️ Desktop GUI
+
+For non-technical users — select a PDF, run the full pipeline, export results:
+
+```bash
+./run_mathpaperstruct_gui.command
+# or
+question-bank-gui
+```
+
+The GUI produces structured JSON and Markdown under `data/gui_runs/<paper_id>/`.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## ⚙️ Configuration
+
+```bash
+# .env
+DEEPSEEK_API_KEY=sk-...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+MINERU_COMMAND=mineru
+DATABASE_URL=postgresql://questionbank:questionbank123@localhost:5432/questionbank
+```
+
+DeepSeek output is validated before entering the pipeline:
+
+| Field | Requirement |
+|-------|-------------|
+| `question_type` | One of: `single_choice`, `multiple_choice`, `fill_blank`, `short_answer`, `proof`, `unknown` |
+| `choices` | Array of `{label, content_latex}` objects |
+| `difficulty` | `null` or integer 1–5 |
+| `confidence` | `structure`, `latex`, `answer`, `knowledge` each 0–1 |
+
+> Missing source answers or analyses remain empty strings — the prompt explicitly forbids guessing.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## 🧪 Development
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+PYTHONPATH=src python3 -m unittest discover -s tests -v
+
+# Run a specific test file
+PYTHONPATH=src python3 -m unittest tests/test_mineru_retry.py -v
+
+# Start API dev server
+uvicorn question_bank.api.app:create_app --factory --reload
+```
+
+### API Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `/` | Web console overview |
+| `/ingest` | Ingest command builder |
+| `/api/health` | Health check |
+| `/api/runs` | Recent run-report.json summaries |
+| `/api/evals` | Recent eval report summaries |
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+## 📄 License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/colored.png" alt="divider" />
+</p>
+
+<p align="center">
+  <sub>Built with ❤️ by the Question Bank Pipeline team</sub>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/andreasbm/readme/master/assets/lines/rainbow.png" alt="rainbow" />
+</p>
