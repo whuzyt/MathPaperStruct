@@ -7,7 +7,7 @@ from pathlib import Path
 
 from question_bank.domain.models import Choice, QualityReport, Question, QuestionAsset, QuestionBlock
 from question_bank.gui.export import export_questions, processing_result_to_dicts
-from question_bank.gui.runner import detect_mineru_command
+from question_bank.gui.runner import build_mineru_command, detect_mineru_command
 from question_bank.pipeline import ProcessingResult
 
 
@@ -108,6 +108,25 @@ class GuiRunnerConfigTest(unittest.TestCase):
             command.chmod(0o755)
 
             self.assertEqual(detect_mineru_command(configured=str(command)), str(command))
+
+    def test_build_mineru_command_uses_pdf_and_output_paths(self):
+        command = build_mineru_command(
+            mineru_command="/tmp/mineru",
+            pdf_path=Path("/tmp/input.pdf"),
+            output_dir=Path("/tmp/out"),
+        )
+
+        self.assertEqual(command, [
+            "/tmp/mineru",
+            "-p",
+            "/tmp/input.pdf",
+            "-o",
+            "/tmp/out",
+            "-f",
+            "true",
+            "-m",
+            "auto",
+        ])
 
 
 if __name__ == "__main__":

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import contextlib
 import io
+import queue
 import shutil
+import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -14,12 +18,14 @@ from question_bank.services.paper_orchestrator import (
     GatingResult,
     IngestionReport,
     StepResult,
+    _discover_mineru_json_files,
     _finalize,
     _now_iso,
     _step_deepseek_structure,
     _step_layout_ownership,
-    _step_mineru_parse,
+    _validate_resume_artifacts,
 )
+from question_bank.services.mineru import MinerUResult, _discover_artifacts
 
 from .export import ExportPaths, export_questions
 
@@ -116,14 +122,7 @@ def run_gui_ingest(
     deepseek_client = _build_deepseek_client(options)
 
     pipeline = [
-        ("MinerU 解析 PDF", _step_mineru_parse, (
-            options.paper_id,
-            str(options.pdf_path),
-            str(work_dir),
-            options.resume,
-            options.mineru_command,
-            ctx,
-        )),
+        ("MinerU 解析 PDF", _step_mineru_parse_gui, (options, work_dir, ctx, emit)),
         ("版面归属与切题", _step_layout_ownership, (options.paper_id, ctx)),
         ("DeepSeek 结构化题目", _step_deepseek_structure, (options.paper_id, deepseek_client, ctx)),
     ]
@@ -175,6 +174,115 @@ def run_gui_ingest(
         export_paths=export_paths,
         log_lines=log_lines,
     )
+
+
+def build_mineru_command(
+    *,
+    mineru_command: str,
+    pdf_path: Path,
+    output_dir: Path,
+) -> list[str]:
+    return [
+        mineru_command,
+        "-p",
+        str(pdf_path),
+        "-o",
+        str(output_dir),
+        "-f",
+        "true",
+        "-m",
+        "auto",
+    ]
+
+
+def _step_mineru_parse_gui(
+    options: GuiIngestOptions,
+    work_dir: Path,
+    ctx: dict,
+    emit: ProgressCallback,
+) -> StepResult:
+    started = _now_iso()
+
+    if options.resume:
+        md_files = list(work_dir.rglob("*.md"))
+        json_files = _discover_mineru_json_files(work_dir)
+        if md_files and json_files and _validate_resume_artifacts(md_files[0], json_files[0]):
+            ctx["mineru_result"] = MinerUResult(
+                output_dir=work_dir,
+                markdown_path=md_files[0],
+                raw_json_path=json_files[0],
+            )
+            emit("发现可复用 MinerU 输出，跳过 PDF 解析。")
+            return StepResult(
+                name="mineru_parse",
+                status="skipped",
+                started_at=started,
+                finished_at=_now_iso(),
+            )
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    cmd = build_mineru_command(
+        mineru_command=options.mineru_command,
+        pdf_path=options.pdf_path,
+        output_dir=work_dir,
+    )
+    emit("$ " + " ".join(cmd))
+    emit("MinerU 首次运行可能会初始化模型/API，耗时较长。")
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    line_queue: queue.Queue[str] = queue.Queue()
+
+    def read_output() -> None:
+        assert process.stdout is not None
+        for line in process.stdout:
+            line_queue.put(line.rstrip())
+
+    reader = threading.Thread(target=read_output, daemon=True)
+    reader.start()
+
+    last_heartbeat = time.monotonic()
+    while process.poll() is None:
+        _drain_mineru_lines(line_queue, emit)
+        now = time.monotonic()
+        if now - last_heartbeat >= 15:
+            elapsed = int(now - last_heartbeat)
+            emit(f"MinerU 仍在运行，最近 {elapsed} 秒无新日志。")
+            last_heartbeat = now
+        time.sleep(0.5)
+
+    _drain_mineru_lines(line_queue, emit)
+    reader.join(timeout=1)
+    _drain_mineru_lines(line_queue, emit)
+    if process.returncode != 0:
+        raise RuntimeError(f"MinerU exited with code {process.returncode}")
+
+    result = _discover_artifacts(work_dir, options.pdf_path.stem)
+    ctx["mineru_result"] = result
+    ok = 1 if result.markdown_path and result.markdown_path.exists() else 0
+    return StepResult(
+        name="mineru_parse",
+        status="success",
+        started_at=started,
+        finished_at=_now_iso(),
+        input_count=1,
+        output_count=ok,
+    )
+
+
+def _drain_mineru_lines(line_queue: queue.Queue[str], emit: ProgressCallback) -> None:
+    while True:
+        try:
+            line = line_queue.get_nowait()
+        except queue.Empty:
+            return
+        if line.strip():
+            emit(line)
 
 
 def _build_deepseek_client(options: GuiIngestOptions):
