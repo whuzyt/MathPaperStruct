@@ -35,6 +35,11 @@ QUESTION_ARABIC_PATTERN = re.compile(
 QUESTION_CHINESE_PATTERN = re.compile(
     r"^\s*[（(]?\s*([一二三四五六七八九十]{1,4})\s*[）)、.．：：]\s*"
 )
+LECTURE_QUESTION_PATTERN = re.compile(
+    r"^\s*【\s*(例|例题|典例|变式|练习)\s*"
+    r"([0-9一二三四五六七八九十]{1,4}(?:[-－—][0-9一二三四五六七八九十]{1,4})?)"
+    r"\s*】\s*"
+)
 OPTION_LABEL_PATTERN = re.compile(r"^\s*[A-H][\.．、:：]\s+")
 VISUAL_CUE_PATTERN = re.compile(
     r"(如图|下图|图中|图示|函数图像|坐标系|表格|统计图|几何图)"
@@ -413,6 +418,12 @@ def detect_question_anchors(
 
     anchors: list[_Element] = []
     seen_numbers: dict[str, list[_Element]] = {}
+    lecture_anchor_orders = [
+        elem.reading_order
+        for elem in sorted_elements
+        if elem.type in ("text", "formula") and LECTURE_QUESTION_PATTERN.match(elem.text.strip())
+    ]
+    first_lecture_anchor_order = min(lecture_anchor_orders) if lecture_anchor_orders else None
 
     for elem in sorted_elements:
         if elem.is_noise or elem.is_header_footer:
@@ -432,17 +443,30 @@ def detect_question_anchors(
         if not text:
             continue
 
-        # Try Arabic number first
-        match = QUESTION_ARABIC_PATTERN.match(text)
-        if match:
-            q_number = match.group(1)
+        marker_end = 0
+        is_lecture_anchor = False
+
+        lecture_match = LECTURE_QUESTION_PATTERN.match(text)
+        if lecture_match:
+            label = lecture_match.group(1)
+            suffix = lecture_match.group(2).replace("－", "-").replace("—", "-")
+            q_number = f"{label}{suffix}"
+            marker_end = lecture_match.end()
+            is_lecture_anchor = True
         else:
-            # Try Chinese number
-            match = QUESTION_CHINESE_PATTERN.match(text)
+            # Try Arabic number first
+            match = QUESTION_ARABIC_PATTERN.match(text)
             if match:
                 q_number = match.group(1)
+                marker_end = match.end()
             else:
-                continue
+                # Try Chinese number
+                match = QUESTION_CHINESE_PATTERN.match(text)
+                if match:
+                    q_number = match.group(1)
+                    marker_end = match.end()
+                else:
+                    continue
 
         # Anchor acceptance: x1 <= column.x1 + 0.12
         cols = page_columns.get(elem.page, [])
@@ -452,11 +476,22 @@ def detect_question_anchors(
                 continue
 
         # Reject decimal numbers (e.g. "0.005", "3.14") that match the pattern
-        if text[match.end():match.end() + 1].isdigit():
+        if not is_lecture_anchor and text[marker_end:marker_end + 1].isdigit():
             continue
 
         # text after marker check
-        remainder = text[match.end():].strip()
+        remainder = text[marker_end:].strip()
+
+        if (
+            first_lecture_anchor_order is not None
+            and elem.reading_order < first_lecture_anchor_order
+            and not is_lecture_anchor
+        ):
+            warnings.append(
+                f"knowledge_note_number_filtered: {q_number} at {elem.id} "
+                f"appears before first lecture example, not a question"
+            )
+            continue
 
         # ADR 017: numbered instructions can appear before any paper part, not
         # only before the first formal section.
@@ -1141,6 +1176,14 @@ def _has_problem_action(text: str) -> bool:
     if re.search(r"若(?!干)", text):
         return True
     return False
+
+
+def _looks_like_knowledge_note_number(text: str) -> bool:
+    """Return True for numbered definition notes in lecture handouts."""
+    compact = re.sub(r"\s+", "", text)
+    has_note_cue = any(cue in compact for cue in KNOWLEDGE_NOTE_CUES)
+    has_action_cue = any(cue in compact for cue in QUESTION_ACTION_CUES)
+    return has_note_cue and not has_action_cue
 
 
 def _has_math_feature(text: str) -> bool:

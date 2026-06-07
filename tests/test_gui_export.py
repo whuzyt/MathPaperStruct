@@ -83,7 +83,11 @@ class GuiExportTest(unittest.TestCase):
 
             markdown = paths.markdown_path.read_text(encoding="utf-8")
             self.assertIn("# paper_gui 题目导出", markdown)
+            self.assertIn("- 题目数：1", markdown)
+            self.assertIn("- 需复核：0", markdown)
             self.assertIn("## 第 1 题", markdown)
+            self.assertIn("- 类型：single_choice", markdown)
+            self.assertIn("- 页码：1", markdown)
             self.assertIn("- B. $2$", markdown)
             self.assertIn("**答案**：B", markdown)
 

@@ -54,6 +54,7 @@ class MathPaperStructApp(tk.Tk):
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._running = False
         self._last_output_dir: Path | None = None
+        self._last_markdown_path: Path | None = None
 
         self._build_ui()
         self.after(120, self._poll_events)
@@ -126,17 +127,24 @@ class MathPaperStructApp(tk.Tk):
             text="打开输出目录",
             command=self._open_output_dir,
         ).grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.open_markdown_button = ttk.Button(
+            action_frame,
+            text="打开 Markdown 结果",
+            command=self._open_markdown_result,
+            state="disabled",
+        )
+        self.open_markdown_button.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(
             action_frame,
             text="清空日志",
             command=self._clear_log,
-        ).grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(
             action_frame,
             textvariable=self.status,
             wraplength=360,
             foreground="#475569",
-        ).grid(row=3, column=0, sticky="ew", pady=(16, 0))
+        ).grid(row=4, column=0, sticky="ew", pady=(16, 0))
 
         log_frame = ttk.LabelFrame(body, text="进度日志", padding=8)
         log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
@@ -203,7 +211,9 @@ class MathPaperStructApp(tk.Tk):
         self._save_settings(silent=True)
 
         self._running = True
+        self._last_markdown_path = None
         self.start_button.configure(state="disabled")
+        self.open_markdown_button.configure(state="disabled")
         self.status.set("正在解析，请不要关闭窗口。")
         self._append_log("开始解析。")
         worker = threading.Thread(target=self._run_worker, args=(options,), daemon=True)
@@ -287,6 +297,10 @@ class MathPaperStructApp(tk.Tk):
         self._running = False
         self.start_button.configure(state="normal")
         self._last_output_dir = Path(self.output_dir.get()) / result.report.paper_id
+        self._last_markdown_path = result.export_paths.markdown_path if result.export_paths else None
+        self.open_markdown_button.configure(
+            state="normal" if self._last_markdown_path else "disabled"
+        )
         total = (
             result.report.questions_passed
             + result.report.questions_warning
@@ -319,6 +333,15 @@ class MathPaperStructApp(tk.Tk):
     def _open_output_dir(self) -> None:
         target = self._last_output_dir or Path(self.output_dir.get()).expanduser()
         target.mkdir(parents=True, exist_ok=True)
+        self._open_path(target)
+
+    def _open_markdown_result(self) -> None:
+        if not self._last_markdown_path:
+            messagebox.showinfo("没有结果", "还没有可打开的 Markdown 结果。")
+            return
+        self._open_path(self._last_markdown_path)
+
+    def _open_path(self, target: Path) -> None:
         if sys.platform == "darwin":
             subprocess.run(["open", str(target)], check=False)
         elif os.name == "nt":

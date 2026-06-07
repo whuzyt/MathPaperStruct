@@ -118,11 +118,25 @@ def _quality_to_dict(report: QualityReport | None) -> dict[str, Any]:
 
 
 def _questions_to_markdown(paper_id: str, questions: list[dict[str, Any]]) -> str:
-    lines = [f"# {paper_id} 题目导出", ""]
+    review_count = sum(1 for q in questions if q.get("quality", {}).get("needs_review"))
+    lines = [
+        f"# {paper_id} 题目导出",
+        "",
+        f"- 题目数：{len(questions)}",
+        f"- 需复核：{review_count}",
+        "",
+    ]
     for index, question in enumerate(questions, start=1):
         number = question.get("question_number") or str(index)
+        pages = ", ".join(str(p) for p in question.get("pages", [])) or "-"
+        q_type = question.get("question_type") or "-"
+        needs_review = "是" if question.get("quality", {}).get("needs_review") else "否"
         lines.extend([
             f"## 第 {number} 题",
+            "",
+            f"- 类型：{q_type}",
+            f"- 页码：{pages}",
+            f"- 需复核：{needs_review}",
             "",
             str(question.get("stem_latex", "")).strip(),
             "",

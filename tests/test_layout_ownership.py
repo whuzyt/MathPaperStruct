@@ -203,6 +203,48 @@ class LayoutOwnershipFixtureTests(unittest.TestCase):
         blocks = layout_ownership("paper_001", elements)
         self.assertEqual(len(blocks), 0)
 
+    def test_lecture_example_anchors_split_handout_questions(self):
+        elements = [
+            {
+                "id": "k1", "page": 1, "type": "text",
+                "bbox": [0.08, 0.10, 0.70, 0.14],
+                "text": "1. 平面向量基本定理：如果两个向量不共线，则任一向量可唯一表示。",
+            },
+            {
+                "id": "k2", "page": 1, "type": "text",
+                "bbox": [0.08, 0.16, 0.70, 0.20],
+                "text": "2. 基底：我们把不共线向量叫做一个基底。",
+            },
+            {
+                "id": "s1", "page": 1, "type": "text",
+                "bbox": [0.08, 0.26, 0.40, 0.30],
+                "text": "考点一 平面向量基本定理的简单应用",
+            },
+            {
+                "id": "q1", "page": 1, "type": "text",
+                "bbox": [0.08, 0.34, 0.78, 0.38],
+                "text": "【例 1-1】设 $e_1,e_2$ 是基底，则下列不能作为基底的是（）",
+            },
+            {
+                "id": "a1", "page": 1, "type": "text",
+                "bbox": [0.10, 0.40, 0.40, 0.44],
+                "text": "A. $e_1+e_2$ 和 $e_1-e_2$",
+            },
+            {
+                "id": "q2", "page": 1, "type": "text",
+                "bbox": [0.08, 0.52, 0.78, 0.56],
+                "text": "【变式 1-1】已知 $A(1,2)$，求点 A 的坐标。",
+            },
+        ]
+
+        blocks = layout_ownership("handout_vector", elements)
+
+        self.assertEqual([b.question_number for b in blocks], ["例1-1", "变式1-1"])
+        self.assertNotIn("k1", blocks[0].element_ids)
+        self.assertIn("q1", blocks[0].element_ids)
+        self.assertIn("a1", blocks[0].element_ids)
+        self.assertIn("q2", blocks[1].element_ids)
+
     # ------------------------------------------------------------------
     # Fixture 6: cross_column_question
     # ------------------------------------------------------------------
