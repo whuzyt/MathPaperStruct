@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -24,6 +25,7 @@ from .export import ExportPaths, export_questions
 
 
 ProgressCallback = Callable[[str], None]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 
 @dataclass(slots=True)
@@ -57,12 +59,37 @@ def default_options(pdf_path: Path, *, output_root: Path | None = None) -> GuiIn
         paper_id=paper_id,
         pdf_path=pdf_path,
         output_dir=root / paper_id,
-        mineru_command=settings.mineru_command,
+        mineru_command=detect_mineru_command(configured=settings.mineru_command),
         deepseek_api_key=settings.deepseek_api_key or "",
         deepseek_base_url=settings.deepseek_base_url,
         deepseek_model=settings.deepseek_model,
         use_real_deepseek=bool(settings.deepseek_api_key),
     )
+
+
+def detect_mineru_command(
+    *,
+    project_root: Path = PROJECT_ROOT,
+    configured: str = "mineru",
+) -> str:
+    configured = configured.strip() or "mineru"
+    configured_path = Path(configured).expanduser()
+    if (configured_path.is_absolute() or "/" in configured) and configured_path.exists():
+        return str(configured_path)
+
+    project_venv_mineru = project_root / ".venv" / "bin" / "mineru"
+    if project_venv_mineru.exists():
+        return str(project_venv_mineru)
+
+    found = shutil.which(configured)
+    if found:
+        return found
+
+    found_mineru = shutil.which("mineru")
+    if found_mineru:
+        return found_mineru
+
+    return configured
 
 
 def run_gui_ingest(
@@ -172,4 +199,3 @@ def _capture_stdout(emit: ProgressCallback):
     if text:
         for line in text.splitlines():
             emit(line)
-

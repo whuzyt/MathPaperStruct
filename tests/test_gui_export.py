@@ -7,6 +7,7 @@ from pathlib import Path
 
 from question_bank.domain.models import Choice, QualityReport, Question, QuestionAsset, QuestionBlock
 from question_bank.gui.export import export_questions, processing_result_to_dicts
+from question_bank.gui.runner import detect_mineru_command
 from question_bank.pipeline import ProcessingResult
 
 
@@ -84,6 +85,29 @@ class GuiExportTest(unittest.TestCase):
             self.assertIn("## 第 1 题", markdown)
             self.assertIn("- B. $2$", markdown)
             self.assertIn("**答案**：B", markdown)
+
+
+class GuiRunnerConfigTest(unittest.TestCase):
+    def test_detect_mineru_command_prefers_project_venv(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mineru = root / ".venv" / "bin" / "mineru"
+            mineru.parent.mkdir(parents=True)
+            mineru.write_text("#!/bin/sh\n", encoding="utf-8")
+            mineru.chmod(0o755)
+
+            self.assertEqual(
+                detect_mineru_command(project_root=root, configured="mineru"),
+                str(mineru),
+            )
+
+    def test_detect_mineru_command_keeps_existing_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            command = Path(tmp) / "mineru"
+            command.write_text("#!/bin/sh\n", encoding="utf-8")
+            command.chmod(0o755)
+
+            self.assertEqual(detect_mineru_command(configured=str(command)), str(command))
 
 
 if __name__ == "__main__":

@@ -9,7 +9,9 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from .runner import GuiIngestOptions, default_options, run_gui_ingest
+from question_bank.config import Settings
+
+from .runner import GuiIngestOptions, default_options, detect_mineru_command, run_gui_ingest
 
 
 class MathPaperStructApp(tk.Tk):
@@ -22,7 +24,10 @@ class MathPaperStructApp(tk.Tk):
         self.pdf_path = tk.StringVar()
         self.paper_id = tk.StringVar()
         self.output_dir = tk.StringVar(value=str(Path("data/gui_runs").resolve()))
-        self.mineru_command = tk.StringVar(value=".venv/bin/mineru")
+        settings = Settings.load()
+        self.mineru_command = tk.StringVar(
+            value=detect_mineru_command(configured=settings.mineru_command)
+        )
         self.deepseek_api_key = tk.StringVar(value=os.environ.get("DEEPSEEK_API_KEY", ""))
         self.deepseek_base_url = tk.StringVar(value=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"))
         self.deepseek_model = tk.StringVar(value=os.environ.get("DEEPSEEK_MODEL", "deepseek-chat"))
@@ -158,7 +163,7 @@ class MathPaperStructApp(tk.Tk):
         self.paper_id.set(options.paper_id)
         if not self.deepseek_api_key.get().strip():
             self.deepseek_api_key.set(options.deepseek_api_key)
-        if self.mineru_command.get() == ".venv/bin/mineru":
+        if self.mineru_command.get().strip() in {"mineru", ""}:
             self.mineru_command.set(options.mineru_command)
 
     def _choose_output_dir(self) -> None:
@@ -283,4 +288,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
