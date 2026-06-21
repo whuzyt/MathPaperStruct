@@ -143,19 +143,28 @@ class GuiRunnerConfigTest(unittest.TestCase):
             "https_proxy": "http://127.0.0.1:7892",
             "DEEPSEEK_API_KEY": "sk-test",
             "PATH": "/usr/bin",
-        })
+        }, modelscope_cache=Path("/tmp/modelscope"))
 
         self.assertTrue(removed)
         self.assertNotIn("HTTP_PROXY", child_env)
         self.assertNotIn("https_proxy", child_env)
         self.assertEqual(child_env["DEEPSEEK_API_KEY"], "sk-test")
         self.assertEqual(child_env["PATH"], "/usr/bin")
+        self.assertEqual(child_env["MINERU_MODEL_SOURCE"], "modelscope")
+        self.assertEqual(child_env["MODELSCOPE_CACHE"], "/tmp/modelscope")
 
     def test_mineru_environment_reports_no_change_without_proxy(self):
-        child_env, removed = build_mineru_environment({"PATH": "/usr/bin"})
+        child_env, removed = build_mineru_environment(
+            {"PATH": "/usr/bin"},
+            modelscope_cache=Path("/tmp/modelscope"),
+        )
 
         self.assertFalse(removed)
-        self.assertEqual(child_env, {"PATH": "/usr/bin"})
+        self.assertEqual(child_env, {
+            "PATH": "/usr/bin",
+            "MINERU_MODEL_SOURCE": "modelscope",
+            "MODELSCOPE_CACHE": "/tmp/modelscope",
+        })
 
 
 class GuiSettingsTest(unittest.TestCase):

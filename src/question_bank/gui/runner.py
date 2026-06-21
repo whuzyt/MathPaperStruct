@@ -200,12 +200,17 @@ def build_mineru_command(
     ]
 
 
-def build_mineru_environment(env: dict[str, str] | None = None) -> tuple[dict[str, str], bool]:
-    """Return a MinerU-only environment without inherited HTTP proxy settings.
+def build_mineru_environment(
+    env: dict[str, str] | None = None,
+    *,
+    modelscope_cache: Path | None = None,
+) -> tuple[dict[str, str], bool]:
+    """Return a MinerU-only environment with stable local model resolution.
 
-    MinerU downloads and validates its local VLM model at startup. Desktop proxy
-    interception can terminate that TLS connection, while the main GUI process
-    may still need its normal environment for other services such as DeepSeek.
+    MinerU's VLM and OCR models are already cached through ModelScope on the
+    desktop setup. Using that cache avoids an intermittent Hugging Face TLS
+    failure after a long PDF inference run. The main GUI process retains its
+    original environment for services such as DeepSeek.
     """
     child_env = dict(os.environ if env is None else env)
     removed = False
@@ -213,6 +218,10 @@ def build_mineru_environment(env: dict[str, str] | None = None) -> tuple[dict[st
         if name in child_env:
             child_env.pop(name)
             removed = True
+    child_env["MINERU_MODEL_SOURCE"] = "modelscope"
+    child_env["MODELSCOPE_CACHE"] = str(
+        modelscope_cache or Path.home() / ".cache" / "modelscope"
+    )
     return child_env, removed
 
 
@@ -252,6 +261,7 @@ def _step_mineru_parse_gui(
     mineru_env, proxy_removed = build_mineru_environment()
     if proxy_removed:
         emit("MinerU 已绕过系统代理，避免模型下载时发生 TLS 连接中断。")
+    emit("MinerU 使用本地 ModelScope 模型缓存。")
 
     process = subprocess.Popen(
         cmd,
