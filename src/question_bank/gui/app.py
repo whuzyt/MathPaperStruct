@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from question_bank.config import Settings
 
+from .paper_builder import PaperBuilderWindow
 from .runner import GuiIngestOptions, default_options, detect_mineru_command, run_gui_ingest
 from .settings import GuiSettings, load_gui_settings, save_gui_settings
 
@@ -136,15 +137,20 @@ class MathPaperStructApp(tk.Tk):
         self.open_markdown_button.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         ttk.Button(
             action_frame,
+            text="组卷",
+            command=self._open_paper_builder,
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            action_frame,
             text="清空日志",
             command=self._clear_log,
-        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=4, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(
             action_frame,
             textvariable=self.status,
             wraplength=360,
             foreground="#475569",
-        ).grid(row=4, column=0, sticky="ew", pady=(16, 0))
+        ).grid(row=5, column=0, sticky="ew", pady=(16, 0))
 
         log_frame = ttk.LabelFrame(body, text="进度日志", padding=8)
         log_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
@@ -340,6 +346,10 @@ class MathPaperStructApp(tk.Tk):
             messagebox.showinfo("没有结果", "还没有可打开的 Markdown 结果。")
             return
         self._open_path(self._last_markdown_path)
+
+    def _open_paper_builder(self) -> None:
+        default_output = Path(self.output_dir.get()).expanduser() / "assembled_papers"
+        PaperBuilderWindow(self, default_output_dir=default_output)
 
     def _open_path(self, target: Path) -> None:
         if sys.platform == "darwin":
