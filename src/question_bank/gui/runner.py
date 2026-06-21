@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import os
 import queue
 import shutil
 import subprocess
@@ -32,6 +33,10 @@ from .export import ExportPaths, export_questions
 
 ProgressCallback = Callable[[str], None]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_PROXY_ENV_NAMES = (
+    "ALL_PROXY", "HTTPS_PROXY", "HTTP_PROXY",
+    "all_proxy", "https_proxy", "http_proxy",
+)
 
 
 @dataclass(slots=True)
@@ -195,6 +200,22 @@ def build_mineru_command(
     ]
 
 
+def build_mineru_environment(env: dict[str, str] | None = None) -> tuple[dict[str, str], bool]:
+    """Return a MinerU-only environment without inherited HTTP proxy settings.
+
+    MinerU downloads and validates its local VLM model at startup. Desktop proxy
+    interception can terminate that TLS connection, while the main GUI process
+    may still need its normal environment for other services such as DeepSeek.
+    """
+    child_env = dict(os.environ if env is None else env)
+    removed = False
+    for name in _PROXY_ENV_NAMES:
+        if name in child_env:
+            child_env.pop(name)
+            removed = True
+    return child_env, removed
+
+
 def _step_mineru_parse_gui(
     options: GuiIngestOptions,
     work_dir: Path,
@@ -228,6 +249,9 @@ def _step_mineru_parse_gui(
     )
     emit("$ " + " ".join(cmd))
     emit("MinerU 首次运行可能会初始化模型/API，耗时较长。")
+    mineru_env, proxy_removed = build_mineru_environment()
+    if proxy_removed:
+        emit("MinerU 已绕过系统代理，避免模型下载时发生 TLS 连接中断。")
 
     process = subprocess.Popen(
         cmd,
@@ -235,6 +259,7 @@ def _step_mineru_parse_gui(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=mineru_env,
     )
     line_queue: queue.Queue[str] = queue.Queue()
 

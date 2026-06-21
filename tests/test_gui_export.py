@@ -7,7 +7,11 @@ from pathlib import Path
 
 from question_bank.domain.models import Choice, QualityReport, Question, QuestionAsset, QuestionBlock
 from question_bank.gui.export import export_questions, processing_result_to_dicts
-from question_bank.gui.runner import build_mineru_command, detect_mineru_command
+from question_bank.gui.runner import (
+    build_mineru_command,
+    build_mineru_environment,
+    detect_mineru_command,
+)
 from question_bank.gui.settings import GuiSettings, load_gui_settings, save_gui_settings
 from question_bank.pipeline import ProcessingResult
 
@@ -132,6 +136,26 @@ class GuiRunnerConfigTest(unittest.TestCase):
             "-m",
             "auto",
         ])
+
+    def test_mineru_environment_removes_proxy_variables_only(self):
+        child_env, removed = build_mineru_environment({
+            "HTTP_PROXY": "http://127.0.0.1:7892",
+            "https_proxy": "http://127.0.0.1:7892",
+            "DEEPSEEK_API_KEY": "sk-test",
+            "PATH": "/usr/bin",
+        })
+
+        self.assertTrue(removed)
+        self.assertNotIn("HTTP_PROXY", child_env)
+        self.assertNotIn("https_proxy", child_env)
+        self.assertEqual(child_env["DEEPSEEK_API_KEY"], "sk-test")
+        self.assertEqual(child_env["PATH"], "/usr/bin")
+
+    def test_mineru_environment_reports_no_change_without_proxy(self):
+        child_env, removed = build_mineru_environment({"PATH": "/usr/bin"})
+
+        self.assertFalse(removed)
+        self.assertEqual(child_env, {"PATH": "/usr/bin"})
 
 
 class GuiSettingsTest(unittest.TestCase):
